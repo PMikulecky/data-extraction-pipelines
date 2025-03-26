@@ -102,6 +102,9 @@ logs/
 # Project specific
 data/raw/*
 !data/raw/.gitkeep
+data/pdfs/
+data/*.csv
+data/download_state.txt
 results/*
 !results/.gitkeep
 download_log.txt 
