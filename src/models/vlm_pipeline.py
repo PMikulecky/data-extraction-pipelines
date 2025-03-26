@@ -12,15 +12,36 @@ from io import BytesIO
 import requests
 from pathlib import Path
 from tqdm import tqdm
-from pdf2image import convert_from_path
+from PIL import Image
+try:
+    from pdf2image import convert_from_path
+    PDF2IMAGE_AVAILABLE = True
+except ImportError:
+    PDF2IMAGE_AVAILABLE = False
+    print("VAROVÁNÍ: Knihovna pdf2image není k dispozici. Pokusím se použít alternativní metodu.")
+
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+    if not PDF2IMAGE_AVAILABLE:
+        print("VAROVÁNÍ: Ani pdf2image ani PyMuPDF nejsou k dispozici.")
+
 from dotenv import load_dotenv
 
 # Import lokálního modulu pro analýzu PDF
 try:
-    from ..utils.pdf_analyzer import PDFAnalyzer
-except ImportError:
-    # Pokud relativní import selže, zkusíme absolutní import
-    from src.utils.pdf_analyzer import PDFAnalyzer
+    # Místo relativního importu použijeme absolutní import
+    import sys
+    import os
+    from pathlib import Path
+    # Přidání nadřazeného adresáře do sys.path
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    from utils.pdf_analyzer import PDFAnalyzer
+except ImportError as e:
+    print(f"Nepodařilo se importovat PDFAnalyzer: {e}")
+    raise
 
 # Načtení proměnných prostředí
 load_dotenv()
@@ -72,7 +93,7 @@ class VLMPipeline:
         'references': "List the first 5 references cited in this academic paper. Return only the list of references without any additional text."
     }
     
-    def __init__(self, model_name="gpt-4-vision-preview", api_key=None):
+    def __init__(self, model_name="gpt-4o", api_key=None):
         """
         Inicializace VLM pipeline.
         
@@ -230,9 +251,38 @@ class VLMPipeline:
         Returns:
             dict: Extrahovaná metadata
         """
-        # Analýza PDF pro identifikaci klíčových částí
-        analyzer = PDFAnalyzer(pdf_path)
-        analyzer.analyze()
+        # Nejprve zkusíme najít text v PDF a extrahovat metadata z textu
+        text = extract_text_from_pdf(pdf_path)
+        if text:
+            # Jednoduché extrakce základních metadat z textu
+            basic_metadata = {
+                'title': '',
+                'authors': '',
+                'abstract': '',
+                'keywords': '',
+                'doi': '',
+                'year': '',
+                'journal': '',
+                'volume': '',
+                'issue': '',
+                'pages': '',
+                'publisher': '',
+                'references': ''
+            }
+            
+            # Pokračujeme s extrakcí z obrázků
+            print("Extrahován text z PDF, pokračuji s extrakcí z obrázků.")
+        
+        # Analýza PDF pro identifikaci klíčových částí - pokud nelze importovat původní analyzer, použijeme vlastní
+        try:
+            # Zkusíme použít importovaný PDFAnalyzer
+            analyzer = PDFAnalyzer(pdf_path)
+            analyzer.analyze()
+        except Exception as e:
+            print(f"Nepodařilo se použít PDFAnalyzer: {e}. Používám alternativní metodu.")
+            # Použijeme vlastní implementaci
+            from .vlm_pipeline import PDFAnalyzer as LocalPDFAnalyzer
+            analyzer = LocalPDFAnalyzer(pdf_path)
         
         # Získání obrázků stránek
         title_image = analyzer.get_title_page_image()
@@ -287,7 +337,7 @@ class VLMPipeline:
         return results
 
 
-def extract_metadata_from_pdfs(pdf_dir, output_file, model_name="gpt-4-vision-preview", limit=None):
+def extract_metadata_from_pdfs(pdf_dir, output_file, model_name="gpt-4o", limit=None):
     """
     Extrahuje metadata z PDF souborů v adresáři pomocí VLM.
     
@@ -316,6 +366,101 @@ def extract_metadata_from_pdfs(pdf_dir, output_file, model_name="gpt-4-vision-pr
     return results
 
 
+def extract_text_from_pdf(pdf_path):
+    """
+    Extrahuje text z PDF souboru.
+    
+    Args:
+        pdf_path (str): Cesta k PDF souboru
+        
+    Returns:
+        str: Extrahovaný text
+    """
+    try:
+        import PyPDF2
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n\n"
+            
+            return text
+    except Exception as e:
+        print(f"Chyba při extrakci textu z PDF souboru {pdf_path}: {e}")
+        return ""
+
+def convert_pdf_to_images(pdf_path):
+    """
+    Konvertuje PDF na obrázky s použitím dostupných knihoven.
+    
+    Args:
+        pdf_path (str): Cesta k PDF souboru
+        
+    Returns:
+        list: Seznam PIL.Image objektů
+    """
+    if PDF2IMAGE_AVAILABLE:
+        try:
+            return convert_from_path(pdf_path)
+        except Exception as e:
+            print(f"Chyba při konverzi PDF na obrázky pomocí pdf2image: {e}")
+            if "poppler" in str(e).lower():
+                print("Je potřeba nainstalovat poppler. Pro Windows navštivte: https://github.com/oschwartz10612/poppler-windows/releases")
+    
+    if PYMUPDF_AVAILABLE:
+        try:
+            pdf_document = fitz.open(pdf_path)
+            images = []
+            for page_num in range(len(pdf_document)):
+                page = pdf_document.load_page(page_num)
+                pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                images.append(img)
+            return images
+        except Exception as e:
+            print(f"Chyba při konverzi PDF na obrázky pomocí PyMuPDF: {e}")
+    
+    print(f"Nepodařilo se konvertovat PDF {pdf_path} na obrázky.")
+    return []
+
+
+class PDFAnalyzer:
+    """
+    Jednoduchá implementace analyzátoru PDF pro případ, kdy nelze importovat původní modul.
+    """
+    def __init__(self, pdf_path):
+        self.pdf_path = pdf_path
+        self.images = []
+        self._load_pdf()
+    
+    def _load_pdf(self):
+        self.images = convert_pdf_to_images(self.pdf_path)
+    
+    def analyze(self):
+        # Jednoduchá implementace
+        pass
+    
+    def get_title_page_image(self):
+        if self.images:
+            return self.images[0]
+        return None
+    
+    def get_abstract_page_image(self):
+        if len(self.images) > 1:
+            return self.images[1]
+        elif self.images:
+            return self.images[0]
+        return None
+    
+    def get_reference_page_images(self):
+        if len(self.images) > 2:
+            return self.images[2:]
+        return []
+
+
 if __name__ == "__main__":
     # Příklad použití
     import sys
@@ -323,7 +468,7 @@ if __name__ == "__main__":
     # Výchozí hodnoty
     pdf_directory = PDF_DIR
     output_file = RESULTS_DIR / "vlm_results.json"
-    model_name = "gpt-4-vision-preview"
+    model_name = "gpt-4o"
     limit = 5  # Omezení počtu souborů pro testování
     
     # Zpracování argumentů příkazové řádky
