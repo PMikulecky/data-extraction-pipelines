@@ -83,10 +83,10 @@ celerybeat-schedule
 .venv
 env/
 venv/
-venv_py311/
 ENV/
 env.bak/
 venv.bak/
+venv_py311/
 
 # Logs
 logs/
@@ -101,4 +101,5 @@ logs/
 
 # Project specific
 data/raw/
-results/ 
+results/
+download_log.txt 
