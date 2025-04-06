@@ -14,6 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import argparse
 import time
+import re  # Přidáno pro práci s regulárními výrazy
 
 # Import lokálních modulů
 from data_preparation import filter_papers_with_valid_doi
@@ -23,9 +24,39 @@ from models.embedded_pipeline import extract_metadata_from_pdfs as extract_with_
 from models.vlm_pipeline import extract_metadata_from_pdfs as extract_with_vlm
 from utils.metadata_comparator import compare_all_metadata, calculate_overall_metrics
 from utils.semantic_comparison import process_comparison_files
+# Import konfiguračního modulu
+from models.config.model_config import load_config, get_config
 
 # Načtení proměnných prostředí
 load_dotenv()
+
+# Vyčištění API klíčů - přidáno pro odstranění problémů s neviditelnými znaky
+def clean_api_keys():
+    """Vyčistí API klíče od mezer a neviditelných znaků"""
+    # Anthropic API klíč
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        # Odstranění mezer, tabulátorů a nových řádků
+        anthropic_key = re.sub(r'\s+', '', anthropic_key)
+        # Odstranění jiných netisknutelných znaků
+        anthropic_key = ''.join(char for char in anthropic_key if char.isprintable())
+        # Nastavení vyčištěného klíče zpět do prostředí
+        os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+        print(f"Anthropic API klíč vyčištěn, začíná: {anthropic_key[:10]}..., délka: {len(anthropic_key)} znaků")
+    
+    # OpenAI API klíč
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if openai_key:
+        # Odstranění mezer, tabulátorů a nových řádků
+        openai_key = re.sub(r'\s+', '', openai_key)
+        # Odstranění jiných netisknutelných znaků
+        openai_key = ''.join(char for char in openai_key if char.isprintable())
+        # Nastavení vyčištěného klíče zpět do prostředí
+        os.environ["OPENAI_API_KEY"] = openai_key
+        print(f"OpenAI API klíč vyčištěn, začíná: {openai_key[:10]}..., délka: {len(openai_key)} znaků")
+
+# Vyčištění API klíčů hned po načtení
+clean_api_keys()
 
 # Definice cest
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -34,10 +65,27 @@ INPUT_CSV = DATA_DIR / "papers.csv"
 FILTERED_CSV = DATA_DIR / "papers-filtered.csv"
 PDF_DIR = DATA_DIR / "pdfs"
 RESULTS_DIR = BASE_DIR / "results"
+CONFIG_DIR = BASE_DIR / "config"
+MODELS_JSON = CONFIG_DIR / "models.json"
 
 # Vytvoření adresářů, pokud neexistují
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Načtení konfigurace
+if MODELS_JSON.exists():
+    print(f"Načítám konfiguraci z {MODELS_JSON}...")
+    load_config(MODELS_JSON)
+    config = get_config()
+    text_config = config.get_text_config()
+    vision_config = config.get_vision_config()
+    embedding_config = config.get_embedding_config()
+    print(f"Konfigurace načtena:")
+    print(f"  Text provider: {text_config['provider']}, model: {text_config['model']}")
+    print(f"  Vision provider: {vision_config['provider']}, model: {vision_config['model']}")
+    print(f"  Embedding provider: {embedding_config['provider']}, model: {embedding_config['model']}")
+else:
+    print(f"Konfigurační soubor {MODELS_JSON} neexistuje, používám výchozí konfiguraci.")
 
 
 def prepare_reference_data(csv_path):
@@ -79,7 +127,7 @@ def prepare_reference_data(csv_path):
     return reference_data
 
 
-def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_download=False, skip_semantic=False):
+def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_download=False, skip_semantic=False, force_extraction=False):
     """
     Spustí celý proces extrakce metadat a porovnání výsledků.
     
@@ -89,10 +137,31 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
         year_filter (list, optional): Seznam let pro filtrování článků
         skip_download (bool, optional): Přeskočí stahování PDF souborů
         skip_semantic (bool, optional): Přeskočí sémantické porovnání
+        force_extraction (bool): Vynutí novou extrakci metadat
         
     Returns:
         dict: Výsledky porovnání
     """
+    # Zobrazení API klíčů před spuštěním extrakce
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    print("\n=== Kontrola API klíčů před spuštěním extrakce ===")
+    if anthropic_key:
+        print(f"Anthropic API klíč je nastaven, začíná: {anthropic_key[:10]}..., délka: {len(anthropic_key)} znaků")
+        # Kontrola, zda klíč obsahuje netisknutelné znaky
+        if any(not c.isprintable() for c in anthropic_key):
+            print("VAROVÁNÍ: Anthropic API klíč obsahuje netisknutelné znaky!")
+        # Kontrola, zda klíč obsahuje bílé znaky
+        if any(c.isspace() for c in anthropic_key):
+            print("VAROVÁNÍ: Anthropic API klíč obsahuje bílé znaky!")
+    else:
+        print("Anthropic API klíč není nastaven!")
+    
+    if openai_key:
+        print(f"OpenAI API klíč je nastaven, začíná: {openai_key[:10]}..., délka: {len(openai_key)} znaků")
+    else:
+        print("OpenAI API klíč není nastaven!")
+    
     # Výchozí modely
     if models is None:
         models = ['embedded']
@@ -129,33 +198,84 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
     # 4. Extrakce metadat pomocí různých modelů
     results = {}
     
-    if 'embedded' in models:
-        print("\n=== Extrakce metadat pomocí Embedded pipeline ===")
-        embedded_output = RESULTS_DIR / "embedded_results.json"
-        
-        if os.path.exists(embedded_output):
-            print(f"Načítám existující výsledky z {embedded_output}...")
-            with open(embedded_output, 'r', encoding='utf-8') as f:
-                embedded_results = json.load(f)
-        else:
-            print("Spouštím extrakci metadat pomocí Embedded pipeline...")
-            embedded_results = extract_with_embedded(PDF_DIR, embedded_output, limit=limit)
-        
-        results['embedded'] = embedded_results
-    
-    if 'vlm' in models:
-        print("\n=== Extrakce metadat pomocí VLM pipeline ===")
-        vlm_output = RESULTS_DIR / "vlm_results.json"
-        
-        if os.path.exists(vlm_output):
-            print(f"Načítám existující výsledky z {vlm_output}...")
-            with open(vlm_output, 'r', encoding='utf-8') as f:
-                vlm_results = json.load(f)
-        else:
-            print("Spouštím extrakci metadat pomocí VLM pipeline...")
-            vlm_results = extract_with_vlm(PDF_DIR, vlm_output, limit=limit)
-        
-        results['vlm'] = vlm_results
+    for model in models:
+        if model == 'embedded':
+            print("\n=== Extrakce metadat pomocí Embedded pipeline ===")
+            print(f"Anthropic API klíč před extrakcí, začíná: {anthropic_key[:10]}..., délka: {len(anthropic_key)} znaků")
+            output_file = RESULTS_DIR / "embedded_results.json"
+            
+            try:
+                # Explicitní předání API klíče
+                from models.config.model_config import get_config
+                config = get_config()
+                text_config = config.get_text_config()
+                provider_name = text_config.get("provider")
+                model_name = text_config.get("model")
+                
+                print(f"Použití providera {provider_name} a modelu {model_name} z konfigurace")
+                
+                # Explicitní předání API klíče podle poskytovatele
+                api_key = None
+                if provider_name == "anthropic":
+                    api_key = anthropic_key
+                    print(f"Předávám explicitně Anthropic API klíč, začátek: {api_key[:10]}...")
+                elif provider_name == "openai":
+                    api_key = openai_key
+                    print(f"Předávám explicitně OpenAI API klíč, začátek: {api_key[:10]}...")
+                
+                results['embedded'] = extract_with_embedded(
+                    PDF_DIR, 
+                    output_file, 
+                    limit=limit, 
+                    force_extraction=force_extraction,
+                    provider_name=provider_name,
+                    model_name=model_name,
+                    api_key=api_key
+                )
+            except Exception as e:
+                import traceback
+                print(f"Chyba při extrakci metadat pomocí Embedded pipeline: {e}")
+                print(f"Podrobnosti chyby: {traceback.format_exc()}")
+                results['embedded'] = {}
+                
+        elif model == 'vlm':
+            print("\n=== Extrakce metadat pomocí VLM pipeline ===")
+            print(f"Anthropic API klíč před extrakcí, začíná: {anthropic_key[:10]}..., délka: {len(anthropic_key)} znaků")
+            output_file = RESULTS_DIR / "vlm_results.json"
+            
+            try:
+                # Explicitní předání API klíče
+                from models.config.model_config import get_config
+                config = get_config()
+                vision_config = config.get_vision_config()
+                provider_name = vision_config.get("provider")
+                model_name = vision_config.get("model")
+                
+                print(f"Použití providera {provider_name} a modelu {model_name} z konfigurace")
+                
+                # Explicitní předání API klíče podle poskytovatele
+                api_key = None
+                if provider_name == "anthropic":
+                    api_key = anthropic_key
+                    print(f"Předávám explicitně Anthropic API klíč, začátek: {api_key[:10]}...")
+                elif provider_name == "openai":
+                    api_key = openai_key
+                    print(f"Předávám explicitně OpenAI API klíč, začátek: {api_key[:10]}...")
+                
+                results['vlm'] = extract_with_vlm(
+                    PDF_DIR, 
+                    output_file, 
+                    limit=limit,
+                    force_extraction=force_extraction,
+                    provider_name=provider_name,
+                    model_name=model_name,
+                    api_key=api_key
+                )
+            except Exception as e:
+                import traceback
+                print(f"Chyba při extrakci metadat pomocí VLM pipeline: {e}")
+                print(f"Podrobnosti chyby: {traceback.format_exc()}")
+                results['vlm'] = {}
     
     # 5. Porovnání výsledků s referenčními daty
     comparison_results = {}
@@ -397,6 +517,7 @@ def main():
     parser.add_argument('--verbose', '-v', action='store_true', help='Podrobnější výstup')
     parser.add_argument('--skip-download', action='store_true', help='Přeskočí stahování PDF souborů')
     parser.add_argument('--skip-semantic', action='store_true', help='Přeskočí sémantické porovnání výsledků')
+    parser.add_argument('--force-extraction', action='store_true', help='Vynutí novou extrakci metadat i když výsledky již existují')
     
     args = parser.parse_args()
     
@@ -406,15 +527,33 @@ def main():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         print("Zapnuto podrobné logování")
     
+    # Nastavení pro vynucenou extrakci
+    if args.force_extraction:
+        # Odstranění existujících souborů s výsledky
+        for model in args.models:
+            result_file = RESULTS_DIR / f"{model}_results.json"
+            if result_file.exists():
+                print(f"Odstraňuji existující výsledky: {result_file}")
+                result_file.unlink()
+    
     start_time = time.time()
     
     try:
+        # Výpis aktuální konfigurace z globální konfigurace modelů
+        config = get_config()
+        text_config = config.get_text_config()
+        vision_config = config.get_vision_config()
+        print(f"Použité nastavení modelů:")
+        print(f"  Text provider: {text_config['provider']}, model: {text_config['model']}")
+        print(f"  Vision provider: {vision_config['provider']}, model: {vision_config['model']}")
+        
         run_extraction_pipeline(
             limit=args.limit, 
             models=args.models, 
             year_filter=args.year_filter, 
             skip_download=args.skip_download,
-            skip_semantic=args.skip_semantic
+            skip_semantic=args.skip_semantic,
+            force_extraction=args.force_extraction
         )
         
         elapsed_time = time.time() - start_time

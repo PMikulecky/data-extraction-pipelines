@@ -107,4 +107,13 @@ data/*.csv
 data/download_state.txt
 results/*
 !results/.gitkeep
-download_log.txt 
+download_log.txt
+
+# Vectorstore
+vectorstore/
+
+# Test files in root directory
+/test_*.py
+
+# Test files in all directories
+**/test_*.py 

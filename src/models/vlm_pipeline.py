@@ -30,6 +30,10 @@ except ImportError:
 
 from dotenv import load_dotenv
 
+# Import pro poskytovatele modelů
+from .providers.factory import ModelProviderFactory
+from .config.model_config import get_config
+
 # Import lokálního modulu pro analýzu PDF
 try:
     # Místo relativního importu použijeme absolutní import
@@ -93,33 +97,32 @@ class VLMPipeline:
         'references': "List the first 5 references cited in this academic paper. Return only the list of references without any additional text."
     }
     
-    def __init__(self, model_name="gpt-4o", api_key=None):
+    def __init__(self, model_name=None, provider_name=None, api_key=None):
         """
         Inicializace VLM pipeline.
         
         Args:
-            model_name (str): Název modelu pro VLM
+            model_name (str, optional): Název modelu
+            provider_name (str, optional): Název poskytovatele API
             api_key (str, optional): API klíč pro přístup k modelu
         """
-        self.model_name = model_name
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        # Načtení konfigurace
+        config = get_config()
+        vision_config = config.get_vision_config()
         
-        if not self.api_key:
-            raise ValueError("API klíč není k dispozici. Nastavte proměnnou prostředí OPENAI_API_KEY nebo předejte api_key parametr.")
-    
-    def encode_image(self, image):
-        """
-        Zakóduje obrázek do base64.
+        # Použití parametrů nebo konfigurace
+        self.provider_name = provider_name or vision_config["provider"]
+        self.model_name = model_name or vision_config["model"]
+        self.api_key = api_key
         
-        Args:
-            image: PIL.Image objekt
-            
-        Returns:
-            str: Zakódovaný obrázek v base64
-        """
-        buffered = BytesIO()
-        image.save(buffered, format="JPEG")
-        return base64.b64encode(buffered.getvalue()).decode("utf-8")
+        # Inicializace poskytovatele modelu
+        self.vision_provider = ModelProviderFactory.create_vision_provider(
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            api_key=self.api_key
+        )
+        
+        print(f"Inicializován vizuální model: {self.model_name} od poskytovatele: {self.provider_name}")
     
     def query_vlm(self, image, query):
         """
@@ -132,50 +135,8 @@ class VLMPipeline:
         Returns:
             str: Odpověď modelu
         """
-        # Zakódování obrázku
-        base64_image = self.encode_image(image)
-        
-        # Příprava dotazu pro API
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
-        payload = {
-            "model": self.model_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": query
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            "max_tokens": 1000
-        }
-        
-        # Odeslání dotazu
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload
-        )
-        
-        # Zpracování odpovědi
-        if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
-        else:
-            print(f"Chyba při dotazu na VLM: {response.status_code} - {response.text}")
-            return ""
+        # Použití poskytovatele pro generování textu z obrázku
+        return self.vision_provider.generate_text_from_image(image, query)
     
     def extract_metadata_from_images(self, images, field):
         """
@@ -251,59 +212,76 @@ class VLMPipeline:
         Returns:
             dict: Extrahovaná metadata
         """
-        # Nejprve zkusíme najít text v PDF a extrahovat metadata z textu
-        text = extract_text_from_pdf(pdf_path)
-        if text:
-            # Jednoduché extrakce základních metadat z textu
-            basic_metadata = {
-                'title': '',
-                'authors': '',
-                'abstract': '',
-                'keywords': '',
-                'doi': '',
-                'year': '',
-                'journal': '',
-                'volume': '',
-                'issue': '',
-                'pages': '',
-                'publisher': '',
-                'references': ''
-            }
-            
-            # Pokračujeme s extrakcí z obrázků
-            print("Extrahován text z PDF, pokračuji s extrakcí z obrázků.")
+        # Převod PDF na obrázky
+        images = self.convert_pdf_to_images(pdf_path)
         
-        # Analýza PDF pro identifikaci klíčových částí - pokud nelze importovat původní analyzer, použijeme vlastní
-        try:
-            # Zkusíme použít importovaný PDFAnalyzer
-            analyzer = PDFAnalyzer(pdf_path)
-            analyzer.analyze()
-        except Exception as e:
-            print(f"Nepodařilo se použít PDFAnalyzer: {e}. Používám alternativní metodu.")
-            # Použijeme vlastní implementaci
-            from .vlm_pipeline import PDFAnalyzer as LocalPDFAnalyzer
-            analyzer = LocalPDFAnalyzer(pdf_path)
-        
-        # Získání obrázků stránek
-        title_image = analyzer.get_title_page_image()
-        abstract_image = analyzer.get_abstract_page_image()
-        reference_images = analyzer.get_reference_page_images()
-        
-        # Kombinace všech obrázků
-        all_images = []
-        if title_image:
-            all_images.append(title_image)
-        if abstract_image and abstract_image != title_image:
-            all_images.append(abstract_image)
-        all_images.extend([img for img in reference_images if img not in all_images])
+        if not images:
+            print(f"Nepodařilo se převést PDF soubor {pdf_path} na obrázky")
+            return {}
         
         # Extrakce metadat
         metadata = {}
         for field in self.METADATA_FIELDS:
             print(f"Extrahuji pole {field}...")
-            metadata[field] = self.extract_metadata_from_images(all_images, field)
+            metadata[field] = self.extract_metadata_from_images(images, field)
         
         return metadata
+    
+    def convert_pdf_to_images(self, pdf_path, dpi=200):
+        """
+        Převede PDF soubor na seznam obrázků.
+        
+        Args:
+            pdf_path (str): Cesta k PDF souboru
+            dpi (int): Rozlišení obrázků
+            
+        Returns:
+            list: Seznam PIL.Image objektů
+        """
+        images = []
+        
+        # Zkusíme nejprve PyMuPDF, protože nevyžaduje externí závislosti
+        if PYMUPDF_AVAILABLE:
+            try:
+                print(f"Převádím PDF na obrázky pomocí PyMuPDF...")
+                doc = fitz.open(pdf_path)
+                for page_num in range(len(doc)):
+                    page = doc.load_page(page_num)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    images.append(img)
+                doc.close()
+                
+                if images:
+                    print(f"Úspěšně převedeno {len(images)} stránek PDF na obrázky pomocí PyMuPDF.")
+                    return images
+                else:
+                    print("PyMuPDF nevytvořil žádné obrázky, zkusím alternativní metodu.")
+            except Exception as e:
+                print(f"Chyba při převodu PDF na obrázky pomocí PyMuPDF: {e}")
+                print("Zkusím alternativní metodu...")
+        
+        # Pokud PyMuPDF selhal nebo není k dispozici, zkusíme pdf2image
+        if PDF2IMAGE_AVAILABLE:
+            try:
+                print(f"Převádím PDF na obrázky pomocí pdf2image (dpi={dpi})...")
+                images = convert_from_path(pdf_path, dpi=dpi)
+                
+                if images:
+                    print(f"Úspěšně převedeno {len(images)} stránek PDF na obrázky pomocí pdf2image.")
+                    return images
+                else:
+                    print("pdf2image nevytvořil žádné obrázky.")
+            except Exception as e:
+                print(f"Chyba při převodu PDF na obrázky pomocí pdf2image: {e}")
+        
+        # Obě metody selhaly nebo nejsou k dispozici
+        if not images:
+            print("Žádná knihovna pro převod PDF na obrázky není k dispozici nebo všechny metody selhaly.")
+            print("Pro správnou funkci VLM pipeline nainstalujte PyMuPDF (pip install pymupdf)")
+            print("nebo pdf2image s Poppler (pip install pdf2image a nainstalujte Poppler do systému).")
+        
+        return images
     
     def extract_metadata_batch(self, pdf_paths, output_file=None):
         """
@@ -337,152 +315,108 @@ class VLMPipeline:
         return results
 
 
-def extract_metadata_from_pdfs(pdf_dir, output_file, model_name="gpt-4o", limit=None):
+def extract_metadata_from_pdfs(pdf_dir, output_file, model_name=None, limit=None, provider_name=None, api_key=None, force_extraction=False):
     """
-    Extrahuje metadata z PDF souborů v adresáři pomocí VLM.
+    Hlavní funkce pro extrakci metadat z PDF souborů.
     
     Args:
         pdf_dir (str): Cesta k adresáři s PDF soubory
         output_file (str): Cesta k výstupnímu souboru
-        model_name (str, optional): Název modelu pro VLM
-        limit (int, optional): Omezení počtu zpracovaných souborů
-        
-    Returns:
-        dict: Extrahovaná metadata pro každý soubor
+        model_name (str, optional): Název modelu
+        limit (int, optional): Maximální počet PDF souborů ke zpracování
+        provider_name (str, optional): Název poskytovatele API
+        api_key (str, optional): API klíč
+        force_extraction (bool): Vynutí novou extrakci i když výsledky již existují
     """
     # Inicializace pipeline
-    pipeline = VLMPipeline(model_name=model_name)
+    pipeline = VLMPipeline(
+        model_name=model_name,
+        provider_name=provider_name,
+        api_key=api_key
+    )
     
     # Získání seznamu PDF souborů
-    pdf_files = [os.path.join(pdf_dir, f) for f in os.listdir(pdf_dir) if f.endswith('.pdf')]
+    pdf_files = list(Path(pdf_dir).glob("*.pdf"))
     
-    # Omezení počtu souborů, pokud je zadáno
+    # Omezení počtu souborů ke zpracování
     if limit:
         pdf_files = pdf_files[:limit]
     
-    # Extrakce metadat
-    results = pipeline.extract_metadata_batch(pdf_files, output_file)
+    # Kontrola, zda již existují výsledky
+    if Path(output_file).exists() and not force_extraction:
+        print(f"Načítám existující výsledky z {output_file}...")
+        try:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                results = json.load(f)
+            print(f"Načteno {len(results)} záznamů.")
+            return results
+        except json.JSONDecodeError:
+            print(f"Chyba při načítání výsledků z {output_file}. Budu vytvářet nové výsledky.")
+            results = {}
+    else:
+        if force_extraction and Path(output_file).exists():
+            print(f"Vynucená nová extrakce - ignoruji existující výsledky v {output_file}")
+        results = {}
+    
+    # Extrakce metadat z PDF souborů
+    with tqdm(total=len(pdf_files), desc="Extrakce metadat") as pbar:
+        for pdf_file in pdf_files:
+            # Získání ID PDF z názvu souboru
+            pdf_id = pdf_file.stem
+            
+            print(f"\nZpracovávám PDF soubor {pdf_file} (ID: {pdf_id})...")
+            
+            try:
+                # Extrakce metadat z PDF souboru
+                metadata = pipeline.extract_metadata(pdf_file)
+                
+                # Uložení metadat do výsledků
+                results[pdf_id] = metadata
+                
+                # Uložení aktuálních výsledků (průběžné ukládání)
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"Chyba při zpracování PDF {pdf_file}: {e}")
+            
+            pbar.update(1)
+    
+    # Uložení konečných výsledků
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
     
     return results
-
-
-def extract_text_from_pdf(pdf_path):
-    """
-    Extrahuje text z PDF souboru.
-    
-    Args:
-        pdf_path (str): Cesta k PDF souboru
-        
-    Returns:
-        str: Extrahovaný text
-    """
-    try:
-        import PyPDF2
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            text = ""
-            
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n\n"
-            
-            return text
-    except Exception as e:
-        print(f"Chyba při extrakci textu z PDF souboru {pdf_path}: {e}")
-        return ""
-
-def convert_pdf_to_images(pdf_path):
-    """
-    Konvertuje PDF na obrázky s použitím dostupných knihoven.
-    
-    Args:
-        pdf_path (str): Cesta k PDF souboru
-        
-    Returns:
-        list: Seznam PIL.Image objektů
-    """
-    if PDF2IMAGE_AVAILABLE:
-        try:
-            return convert_from_path(pdf_path)
-        except Exception as e:
-            print(f"Chyba při konverzi PDF na obrázky pomocí pdf2image: {e}")
-            if "poppler" in str(e).lower():
-                print("Je potřeba nainstalovat poppler. Pro Windows navštivte: https://github.com/oschwartz10612/poppler-windows/releases")
-    
-    if PYMUPDF_AVAILABLE:
-        try:
-            pdf_document = fitz.open(pdf_path)
-            images = []
-            for page_num in range(len(pdf_document)):
-                page = pdf_document.load_page(page_num)
-                pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                images.append(img)
-            return images
-        except Exception as e:
-            print(f"Chyba při konverzi PDF na obrázky pomocí PyMuPDF: {e}")
-    
-    print(f"Nepodařilo se konvertovat PDF {pdf_path} na obrázky.")
-    return []
-
-
-class PDFAnalyzer:
-    """
-    Jednoduchá implementace analyzátoru PDF pro případ, kdy nelze importovat původní modul.
-    """
-    def __init__(self, pdf_path):
-        self.pdf_path = pdf_path
-        self.images = []
-        self._load_pdf()
-    
-    def _load_pdf(self):
-        self.images = convert_pdf_to_images(self.pdf_path)
-    
-    def analyze(self):
-        # Jednoduchá implementace
-        pass
-    
-    def get_title_page_image(self):
-        if self.images:
-            return self.images[0]
-        return None
-    
-    def get_abstract_page_image(self):
-        if len(self.images) > 1:
-            return self.images[1]
-        elif self.images:
-            return self.images[0]
-        return None
-    
-    def get_reference_page_images(self):
-        if len(self.images) > 2:
-            return self.images[2:]
-        return []
 
 
 if __name__ == "__main__":
     # Příklad použití
     import sys
+    import argparse
     
-    # Výchozí hodnoty
-    pdf_directory = PDF_DIR
-    output_file = RESULTS_DIR / "vlm_results.json"
-    model_name = "gpt-4o"
-    limit = 5  # Omezení počtu souborů pro testování
+    # Vytvoření parseru argumentů
+    parser = argparse.ArgumentParser(description='Extrakce metadat z PDF souborů pomocí VLM pipeline.')
+    parser.add_argument('--pdf_dir', type=str, default=str(PDF_DIR), help='Cesta k adresáři s PDF soubory')
+    parser.add_argument('--output_file', type=str, default=str(RESULTS_DIR / "vlm_results.json"), help='Cesta k výstupnímu souboru')
+    parser.add_argument('--model_name', type=str, default=None, help='Název modelu')
+    parser.add_argument('--limit', type=int, default=None, help='Omezení počtu zpracovaných souborů')
+    parser.add_argument('--provider', type=str, default=None, help='Název poskytovatele API (openai, anthropic)')
+    parser.add_argument('--config', type=str, default=None, help='Cesta ke konfiguračnímu souboru')
     
-    # Zpracování argumentů příkazové řádky
-    if len(sys.argv) > 1:
-        pdf_directory = sys.argv[1]
-    if len(sys.argv) > 2:
-        output_file = sys.argv[2]
-    if len(sys.argv) > 3:
-        model_name = sys.argv[3]
-    if len(sys.argv) > 4:
-        limit = int(sys.argv[4])
+    # Parsování argumentů
+    args = parser.parse_args()
     
-    # Extrakce metadat
-    results = extract_metadata_from_pdfs(pdf_directory, output_file, model_name, limit)
+    # Načtení konfigurace, pokud je zadána
+    if args.config:
+        from .config.model_config import load_config
+        load_config(args.config)
     
-    print(f"\nExtrakce metadat dokončena. Výsledky uloženy do {output_file}")
-    print(f"Zpracováno {len(results)} PDF souborů.") 
+    # Spuštění extrakce metadat
+    results = extract_metadata_from_pdfs(
+        args.pdf_dir, 
+        args.output_file, 
+        model_name=args.model_name,
+        limit=args.limit,
+        provider_name=args.provider
+    )
+    
+    print(f"Extrakce metadat dokončena. Výsledky uloženy do {args.output_file}") 

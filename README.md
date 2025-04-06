@@ -44,7 +44,22 @@ cd metadata-extraction-ai
 
 # Instalace závislostí
 pip install -r requirements.txt
+
+# Instalace závislostí pro vektorovou databázi (pro Embedded pipeline)
+pip install langchain-chroma chromadb
 ```
+
+### Požadavky
+
+Projekt vyžaduje následující hlavní knihovny:
+
+- langchain - pro zpracování textu a vektorovou databázi
+- langchain-chroma, chromadb - pro vektorovou databázi
+- openai, anthropic - pro připojení k API modelů
+- PyPDF2 - pro extrakci textu z PDF souborů
+- matplotlib, pandas - pro analýzu a vizualizaci výsledků
+
+Kompletní seznam závislostí je v souboru `requirements.txt`.
 
 ## Použití
 
@@ -67,6 +82,24 @@ python src/main.py --models embedded vlm --limit 10 --skip-download
 - `--skip-download`: Přeskočí stahování PDF souborů
 - `--skip-semantic`: Přeskočí sémantické porovnání výsledků
 - `--verbose`: Podrobnější výstup
+- `--force-extraction`: Vynutí novou extrakci i když výsledky již existují
+
+## Embedded Pipeline
+
+Embedded Pipeline zpracovává PDF dokumenty následujícím způsobem:
+
+1. **Extrakce textu**: Text je extrahován z PDF souboru.
+2. **Chunking**: Text je rozdělen na menší části (chunky) s překryvem pro zachování kontextu.
+3. **Vektorizace**: Pro každý PDF dokument je vytvořen samostatný vectorstore.
+   - Každý chunk je převeden na vektorovou reprezentaci pomocí embedding modelu.
+   - Chunky jsou uloženy ve vectorstore s metadaty pro snadné vyhledávání.
+4. **Dotazování**: Pro extrakci metadat se provádí sémantické vyhledávání:
+   - Pro každý typ metadat (titul, autoři, atd.) je vytvořen specifický dotaz.
+   - Vyhledání 5 nejvíce relevantních chunků v dokumentu.
+   - Spojení těchto chunků do kontextu pro jazykový model.
+5. **Extrakce**: LLM model extrahuje požadovaná metadata z poskytnutého kontextu.
+
+Vectorstore pro každý dokument je vytvářen v adresáři `vectorstore/embedded_pipeline` s náhodně generovaným ID, což zajišťuje izolaci dat a nezávislé zpracování dokumentů.
 
 ## Sémantické porovnání
 
@@ -140,6 +173,8 @@ metadata-extraction-ai/
 │   │   └── run_semantic_comparison.py # Samostatný skript pro sémantické porovnání
 │   └── main.py                   # Hlavní skript
 ├── results/                      # Výsledky porovnání
+├── vectorstore/                  # Adresář pro vektorové databáze
+│   └── embedded_pipeline/        # Vektorové databáze pro Embedded pipeline
 ├── requirements.txt              # Seznam závislostí
 └── README.md                     # Dokumentace projektu
 ```

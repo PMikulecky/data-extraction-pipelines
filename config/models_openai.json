@@ -1,0 +1,14 @@
+{
+  "text": {
+    "provider": "openai",
+    "model": "gpt-3.5-turbo"
+  },
+  "vision": {
+    "provider": "openai",
+    "model": "gpt-4o"
+  },
+  "embedding": {
+    "provider": "openai",
+    "model": "text-embedding-3-small"
+  }
+} 

@@ -1,0 +1,14 @@
+{
+  "text": {
+    "provider": "anthropic",
+    "model": "claude-3-haiku-20240307"
+  },
+  "vision": {
+    "provider": "anthropic",
+    "model": "claude-3-haiku-20240307"
+  },
+  "embedding": {
+    "provider": "openai",
+    "model": "text-embedding-3-small"
+  }
+} 

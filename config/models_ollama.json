@@ -1,0 +1,14 @@
+{
+  "text": {
+    "provider": "ollama",
+    "model": "llama2:7b"
+  },
+  "vision": {
+    "provider": "ollama",
+    "model": "llava:7b"
+  },
+  "embedding": {
+    "provider": "ollama",
+    "model": "nomic-embed-text"
+  }
+} 
