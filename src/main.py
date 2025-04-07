@@ -518,6 +518,7 @@ def main():
     parser.add_argument('--skip-download', action='store_true', help='Přeskočí stahování PDF souborů')
     parser.add_argument('--skip-semantic', action='store_true', help='Přeskočí sémantické porovnání výsledků')
     parser.add_argument('--force-extraction', action='store_true', help='Vynutí novou extrakci metadat i když výsledky již existují')
+    parser.add_argument('--config', type=str, default=None, help='Cesta ke konfiguračnímu souboru modelů')
     
     args = parser.parse_args()
     
@@ -526,6 +527,22 @@ def main():
         import logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         print("Zapnuto podrobné logování")
+    
+    # Načtení konfigurace, pokud je zadána
+    if args.config:
+        if os.path.exists(args.config):
+            print(f"Načítám konfiguraci z {args.config}...")
+            load_config(args.config)
+            config = get_config()
+            text_config = config.get_text_config()
+            vision_config = config.get_vision_config()
+            embedding_config = config.get_embedding_config()
+            print(f"Konfigurace načtena z {args.config}")
+            print(f"  Text provider: {text_config['provider']}, model: {text_config['model']}")
+            print(f"  Vision provider: {vision_config['provider']}, model: {vision_config['model']}")
+            print(f"  Embedding provider: {embedding_config['provider']}, model: {embedding_config['model']}")
+        else:
+            print(f"VAROVÁNÍ: Konfigurační soubor {args.config} neexistuje, používám výchozí konfiguraci.")
     
     # Nastavení pro vynucenou extrakci
     if args.force_extraction:

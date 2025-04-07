@@ -1,0 +1,77 @@
+[
+  {
+    "name": "gemma3-4b-vlm",
+    "text": {
+      "provider": "ollama",
+      "model": "gemma3:4b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "gemma3:4b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "nomic-embed-text"
+    }
+  },
+  {
+    "name": "qwen2.5-llama3.2-vision",
+    "text": {
+      "provider": "ollama",
+      "model": "qwen2.5:7b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "llama3.2-vision:11b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "nomic-embed-text"
+    }
+  },
+  {
+    "name": "llama3.2-minicpm",
+    "text": {
+      "provider": "ollama",
+      "model": "llama3.2:3b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "minicpm-v:8b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "mxbai-embed-large:335m"
+    }
+  },
+  {
+    "name": "llama3.1-granite",
+    "text": {
+      "provider": "ollama",
+      "model": "llama3.1:8b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "granite3.2-vision:2b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "nomic-embed-text"
+    }
+  },
+  {
+    "name": "phi4-llava",
+    "text": {
+      "provider": "ollama",
+      "model": "phi4:14b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "llava-llama3:8b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "mxbai-embed-large:335m"
+    }
+  }
+] 

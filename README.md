@@ -84,6 +84,49 @@ python src/main.py --models embedded vlm --limit 10 --skip-download
 - `--verbose`: Podrobnější výstup
 - `--force-extraction`: Vynutí novou extrakci i když výsledky již existují
 
+### Hromadné spuštění s různými konfiguracemi modelů
+
+Pro snadné porovnání různých modelů Ollama lze použít skript pro hromadné spuštění:
+
+```bash
+# Spuštění s výchozími konfiguracemi modelů
+python src/run_all_models.py
+
+# Použití vlastního konfiguračního souboru
+python src/run_all_models.py --config config/model_configs.json
+
+# Omezení počtu zpracovaných souborů
+python src/run_all_models.py --limit 5 --skip-download
+```
+
+Konfigurační soubor obsahuje seznam různých konfigurací modelů ve formátu:
+
+```json
+[
+  {
+    "name": "konfigurace-1",
+    "text": {
+      "provider": "ollama",
+      "model": "llama3.1:8b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "llama3.2-vision:11b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "mxbai-embed-large:335m"
+    }
+  },
+  {
+    "name": "konfigurace-2",
+    ...
+  }
+]
+```
+
+Výsledky pro každou konfiguraci budou uloženy v samostatném adresáři v rámci složky `results/`.
+
 ## Embedded Pipeline
 
 Embedded Pipeline zpracovává PDF dokumenty následujícím způsobem:
@@ -171,7 +214,11 @@ metadata-extraction-ai/
 │   │   └── semantic_comparison.py # Sémantické porovnání extrakcí
 │   ├── scripts/
 │   │   └── run_semantic_comparison.py # Samostatný skript pro sémantické porovnání
+│   ├── run_all_models.py         # Skript pro hromadné spuštění s různými konfiguracemi
 │   └── main.py                   # Hlavní skript
+├── config/
+│   ├── models.json               # Aktuální konfigurace modelů
+│   └── model_configs.json        # Konfigurace pro hromadné spuštění
 ├── results/                      # Výsledky porovnání
 ├── vectorstore/                  # Adresář pro vektorové databáze
 │   └── embedded_pipeline/        # Vektorové databáze pro Embedded pipeline
