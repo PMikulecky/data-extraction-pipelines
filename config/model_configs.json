@@ -1,39 +1,24 @@
 [
   {
-    "name": "gemma3-4b-vlm",
+    "name": "gemma3:4b_granite3.2-2b_nomic-embed-large-335m",
     "text": {
       "provider": "ollama",
       "model": "gemma3:4b"
     },
     "vision": {
       "provider": "ollama",
-      "model": "gemma3:4b"
+      "model": "granite3.2-vision:2b"
     },
     "embedding": {
       "provider": "ollama",
-      "model": "nomic-embed-text"
+      "model": "nomic-embed-text:latest"
     }
   },
   {
-    "name": "qwen2.5-llama3.2-vision",
+    "name": "qwen2.5:7b_minicpm-v:8b_mxbai-embed-large-335m",
     "text": {
       "provider": "ollama",
       "model": "qwen2.5:7b"
-    },
-    "vision": {
-      "provider": "ollama",
-      "model": "llama3.2-vision:11b"
-    },
-    "embedding": {
-      "provider": "ollama",
-      "model": "nomic-embed-text"
-    }
-  },
-  {
-    "name": "llama3.2-minicpm",
-    "text": {
-      "provider": "ollama",
-      "model": "llama3.2:3b"
     },
     "vision": {
       "provider": "ollama",
@@ -45,25 +30,10 @@
     }
   },
   {
-    "name": "llama3.1-granite",
+    "name": "llama3.2:3b_gemma3:12b_bge-m3:latest",
     "text": {
       "provider": "ollama",
-      "model": "llama3.1:8b"
-    },
-    "vision": {
-      "provider": "ollama",
-      "model": "granite3.2-vision:2b"
-    },
-    "embedding": {
-      "provider": "ollama",
-      "model": "nomic-embed-text"
-    }
-  },
-  {
-    "name": "phi4-llava",
-    "text": {
-      "provider": "ollama",
-      "model": "phi4:14b"
+      "model": "llama3.2:3b"
     },
     "vision": {
       "provider": "ollama",
@@ -71,7 +41,52 @@
     },
     "embedding": {
       "provider": "ollama",
-      "model": "mxbai-embed-large:335m"
+      "model": "bge-m3:latest"
+    }
+  },
+  {
+    "name": "llama3.1:8b_gemma3:4b_snowflake-arctic-embed:335m",
+    "text": {
+      "provider": "ollama",
+      "model": "llama3.1:8b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "gemma3:4b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "snowflake-arctic-embed:335m"
+    }
+  },
+  {
+    "name": "phi4:14b_gemma3:12b_snowflake-arctic-embed2:latest",
+    "text": {
+      "provider": "ollama",
+      "model": "phi4:14b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "gemma3:12b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "snowflake-arctic-embed2:latest"
+    }
+  },
+  {
+    "name": "phi4:14b_llama3.2-vision:11b_paraphrase-multilingual:latest",
+    "text": {
+      "provider": "ollama",
+      "model": "phi4:14b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "llama3.2-vision:11b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "paraphrase-multilingual:latest"
     }
   }
 ] 
