@@ -342,21 +342,9 @@ def extract_metadata_from_pdfs(pdf_dir, output_file, model_name=None, limit=None
     if limit:
         pdf_files = pdf_files[:limit]
     
-    # Kontrola, zda již existují výsledky
-    if Path(output_file).exists() and not force_extraction:
-        print(f"Načítám existující výsledky z {output_file}...")
-        try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                results = json.load(f)
-            print(f"Načteno {len(results)} záznamů.")
-            return results
-        except json.JSONDecodeError:
-            print(f"Chyba při načítání výsledků z {output_file}. Budu vytvářet nové výsledky.")
-            results = {}
-    else:
-        if force_extraction and Path(output_file).exists():
-            print(f"Vynucená nová extrakce - ignoruji existující výsledky v {output_file}")
-        results = {}
+    # Vždy vytváříme nové výsledky bez ohledu na existenci souborů
+    print(f"Provádím novou extrakci metadat...")
+    results = {}
     
     # Extrakce metadat z PDF souborů
     with tqdm(total=len(pdf_files), desc="Extrakce metadat") as pbar:

@@ -25,6 +25,7 @@ CONFIG_DIR = BASE_DIR / "config"
 RESULTS_DIR = BASE_DIR / "results"
 TEMP_CONFIG_FILE = CONFIG_DIR / "temp_model_config.json"
 MAIN_SCRIPT = BASE_DIR / "src" / "main.py"
+DEFAULT_CONFIG_FILE = CONFIG_DIR / "model_configs.json"
 
 
 def parse_args():
@@ -40,97 +41,50 @@ def parse_args():
     return parser.parse_args()
 
 
-def get_ollama_configurations() -> List[Dict[str, Any]]:
+def get_default_configuration() -> Dict[str, Any]:
     """
-    Vrátí seznam předefinovaných konfigurací modelů Ollama.
-    Každá konfigurace obsahuje kompletní nastavení pro text, vision a embedding modely.
+    Vrátí jednu výchozí konfiguraci, která se použije, když není dostupný konfigurační soubor.
     
     Returns:
-        List[Dict[str, Any]]: Seznam konfigurací modelů
+        Dict[str, Any]: Výchozí konfigurace modelu
     """
-    # Výchozí konfigurace, pokud nejsou definovány externě
-    return [
-        # Konfigurace 1: Gemma 3 + Llama 3.2 Vision
-        {
-            "name": "gemma3-llama3.2-vision",
-            "text": {
-                "provider": "ollama",
-                "model": "gemma3:4b"
-            },
-            "vision": {
-                "provider": "ollama",
-                "model": "llama3.2-vision:11b"
-            },
-            "embedding": {
-                "provider": "ollama",
-                "model": "nomic-embed-text:latest"
-            }
+    return {
+        "name": "default-config",
+        "text": {
+            "provider": "ollama",
+            "model": "llama3:8b"
         },
-        # Konfigurace 2: Qwen 2.5 + MiniCPM
-        {
-            "name": "qwen2.5-minicpm",
-            "text": {
-                "provider": "ollama",
-                "model": "qwen2.5:7b"
-            },
-            "vision": {
-                "provider": "ollama",
-                "model": "minicpm-v:8b"
-            },
-            "embedding": {
-                "provider": "ollama",
-                "model": "nomic-embed-text:latest"
-            }
+        "vision": {
+            "provider": "ollama", 
+            "model": "llama3.2-vision:11b"
         },
-        # Konfigurace 3: Llama 3.2 + Granite
-        {
-            "name": "llama3.2-granite",
-            "text": {
-                "provider": "ollama",
-                "model": "llama3.2:3b"
-            },
-            "vision": {
-                "provider": "ollama",
-                "model": "granite3.2-vision:2b"
-            },
-            "embedding": {
-                "provider": "ollama",
-                "model": "nomic-embed-text:latest"
-            }
+        "embedding": {
+            "provider": "ollama",
+            "model": "nomic-embed-text:latest"
         },
-        # Konfigurace 4: Llama 3.1 + LLaVA
-        {
-            "name": "llama3.1-llava",
-            "text": {
-                "provider": "ollama",
-                "model": "llama3.1:8b"
-            },
-            "vision": {
-                "provider": "ollama",
-                "model": "llava-llama3:8b"
-            },
-            "embedding": {
-                "provider": "ollama",
-                "model": "nomic-embed-text:latest"
-            }
-        },
-        # Konfigurace 5: Phi 4 + Llama 3.2 Vision
-        {
-            "name": "phi4-llama3.2-vision",
-            "text": {
-                "provider": "ollama",
-                "model": "phi4:14b"
-            },
-            "vision": {
-                "provider": "ollama",
-                "model": "llama3.2-vision:11b"
-            },
-            "embedding": {
-                "provider": "ollama",
-                "model": "nomic-embed-text:latest"
-            }
+        "text_pipeline": {
+            "enabled": True,
+            "max_text_length": 6000,
+            "extract_references": True,
+            "use_direct_pattern_extraction": True
         }
-    ]
+    }
+
+
+def ensure_config_file() -> str:
+    """
+    Zajistí, že konfigurační soubor existuje. Pokud ne, vytvoří ho s výchozí konfigurací.
+    
+    Returns:
+        str: Cesta ke konfiguračnímu souboru
+    """
+    if not DEFAULT_CONFIG_FILE.exists():
+        print(f"Konfigurační soubor {DEFAULT_CONFIG_FILE} neexistuje, vytvářím výchozí konfiguraci.")
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(DEFAULT_CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump([get_default_configuration()], f, ensure_ascii=False, indent=2)
+    
+    return str(DEFAULT_CONFIG_FILE)
 
 
 def load_configurations_from_file(file_path: str) -> List[Dict[str, Any]]:
@@ -150,12 +104,29 @@ def load_configurations_from_file(file_path: str) -> List[Dict[str, Any]]:
         # Kontrola, že načtený objekt je seznam konfigurací
         if not isinstance(configs, list):
             print(f"Chyba: Soubor {file_path} neobsahuje seznam konfigurací.")
-            return get_ollama_configurations()
+            print("Používám výchozí konfiguraci.")
+            return [get_default_configuration()]
+        
+        # Kontrola, že každá konfigurace obsahuje požadované klíče
+        valid_configs = []
+        for config in configs:
+            # Kontrola požadovaných klíčů
+            if all(key in config for key in ['text', 'vision', 'embedding', 'name']):
+                valid_configs.append(config)
+            else:
+                print(f"Varování: Konfigurace {config.get('name', 'unknown')} neobsahuje všechny požadované klíče.")
+                
+        if not valid_configs:
+            print("Žádná platná konfigurace nebyla nalezena.")
+            print("Používám výchozí konfiguraci.")
+            return [get_default_configuration()]
             
-        return configs
+        print(f"Načteno {len(valid_configs)} platných konfigurací.")
+        return valid_configs
     except Exception as e:
         print(f"Chyba při načítání konfigurací ze souboru {file_path}: {e}")
-        return get_ollama_configurations()
+        print("Používám výchozí konfiguraci.")
+        return [get_default_configuration()]
 
 
 def save_temp_config(config: Dict[str, Any]) -> None:
@@ -200,100 +171,29 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
     Args:
         config (Dict[str, Any]): Konfigurace modelu
         args: Argumenty příkazové řádky
-        processed_models (Dict[str, str]): Slovník již zpracovaných modelů a cest k jejich výsledkům
+        processed_models (Dict[str, str]): Seznam již zpracovaných modelů a cest k jejich výsledkům
     """
-    config_name = config.get("name", "unknown_config")
+    config_name = config.get("name", "unknown")
+    print(f"\n=== Spouštím extrakci metadat s konfigurací: {config_name} ===")
     
-    # Získání identifikátorů jednotlivých modelů
-    text_model_id = f"{config['text']['provider']}_{config['text']['model']}"
-    vision_model_id = f"{config['vision']['provider']}_{config['vision']['model']}"
-    embedding_model_id = f"{config['embedding']['provider']}_{config['embedding']['model']}"
+    # Příprava adresáře pro výsledky
+    result_dir = prepare_result_directory(config_name)
     
-    # Kontrola, zda byly všechny modely v konfiguraci již zpracovány
-    text_already_processed = text_model_id in processed_models
-    vision_already_processed = vision_model_id in processed_models
-    embedding_already_processed = embedding_model_id in processed_models
-    
-    # Pokud byly všechny modely již zpracovány, můžeme přeskočit extrakci
-    if text_already_processed and vision_already_processed and embedding_already_processed:
-        print(f"\n\n=== Přeskakuji extrakci pro konfiguraci: {config_name} ===")
-        print("Všechny modely již byly zpracovány v předchozích bězích.")
-        print(f"Text model: {config['text']['provider']} - {config['text']['model']} (již zpracováno)")
-        print(f"Vision model: {config['vision']['provider']} - {config['vision']['model']} (již zpracováno)")
-        print(f"Embedding model: {config['embedding']['provider']} - {config['embedding']['model']} (již zpracováno)")
-        
-        # Připravíme výstupní adresář
-        result_dir = prepare_result_directory(config_name)
-        result_dir_path = Path(result_dir)
-        
-        # Zkopírujeme existující výsledky do nového adresáře
-        print(f"Kopíruji existující výsledky...")
-        
-        # Uložíme konfiguraci do adresáře s výsledky
-        with open(result_dir_path / "used_config.json", 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-        
-        # Spojujeme výsledky modelů do jednoho výstupu
-        combine_existing_results(
-            processed_models[text_model_id],
-            processed_models[vision_model_id],
-            processed_models[embedding_model_id],
-            result_dir_path
-        )
-        
-        return
-    
-    print(f"\n\n=== Spouštím extrakci s konfigurací: {config_name} ===")
-    print(f"Text model: {config['text']['provider']} - {config['text']['model']}" + 
-          (" (již zpracováno)" if text_already_processed else ""))
-    print(f"Vision model: {config['vision']['provider']} - {config['vision']['model']}" + 
-          (" (již zpracováno)" if vision_already_processed else ""))
-    print(f"Embedding model: {config['embedding']['provider']} - {config['embedding']['model']}" + 
-          (" (již zpracováno)" if embedding_already_processed else ""))
-    
-    # Uložíme dočasnou konfiguraci
+    # Uložení dočasné konfigurace
     save_temp_config(config)
     
-    # Načteme konfiguraci do globální instance
-    from models.config.model_config import load_config
-    load_config(str(TEMP_CONFIG_FILE))
-    
-    # Připravíme výstupní adresář
-    result_dir = prepare_result_directory(config_name)
-    result_dir_path = Path(result_dir)
-    
-    # Vymažeme předchozí výsledky, abychom vynutili novou extrakci
-    print(f"Mažu předchozí výsledky pro vynucení nové extrakce...")
-    result_files_to_delete = [
-        RESULTS_DIR / "embedded_results.json",
-        RESULTS_DIR / "vlm_results.json",
-        RESULTS_DIR / "embedded_comparison.json",
-        RESULTS_DIR / "vlm_comparison.json",
-        RESULTS_DIR / "semantic_comparison_results.json",
-        RESULTS_DIR / "embedded_comparison_semantic.json",
-        RESULTS_DIR / "vlm_comparison_semantic.json"
+    # Nastavení argumentů pro spuštění hlavního programu
+    cmd_args = [
+        sys.executable,
+        str(MAIN_SCRIPT),
+        "--models", "embedded", "vlm", "text",  # Přidána textová pipeline
+        "--limit", str(args.limit) if args.limit else "100",
     ]
-    
-    for file_path in result_files_to_delete:
-        if file_path.exists():
-            print(f"  Mažu {file_path.name}")
-            file_path.unlink()
-    
-    # Připravíme argumenty pro main.py
-    cmd_args = [sys.executable, str(MAIN_SCRIPT)]
     
     # Přidáme cestu ke konfiguraci
     cmd_args.extend(["--config", str(TEMP_CONFIG_FILE)])
     
-    # Přidáme modely
-    cmd_args.extend(["--models", "embedded", "vlm"])
-    
-    # Vždy vynucujeme novou extrakci
-    cmd_args.append("--force-extraction")
-    
     # Přidáme další argumenty
-    if args.limit:
-        cmd_args.extend(["--limit", str(args.limit)])
     if args.year_filter:
         cmd_args.extend(["--year-filter"] + [str(year) for year in args.year_filter])
     if args.skip_download:
@@ -310,17 +210,20 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
         print(f"Extrakce dokončena s návratovým kódem: {result.returncode}")
         
         # Kopírujeme konfigurační soubor do adresáře s výsledky pro pozdější referenci
-        shutil.copy(TEMP_CONFIG_FILE, result_dir_path / "used_config.json")
+        shutil.copy(TEMP_CONFIG_FILE, Path(result_dir) / "used_config.json")
         
         # Kopírujeme výsledky do specifického adresáře
         result_files = [
             "embedded_results.json",
             "vlm_results.json",
+            "text_results.json",  # Přidány výsledky textové pipeline
             "embedded_comparison.json",
             "vlm_comparison.json",
+            "text_comparison.json",  # Přidáno porovnání textové pipeline
             "semantic_comparison_results.json",
             "embedded_comparison_semantic.json",
             "vlm_comparison_semantic.json",
+            "text_comparison_semantic.json",  # Přidáno sémantické porovnání textové pipeline
             "comparison_results.png",
             "overall_results.png",
             "overall_results.csv",
@@ -333,12 +236,12 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
             source_file = RESULTS_DIR / filename
             if source_file.exists():
                 print(f"Kopíruji {filename} do adresáře výsledků...")
-                shutil.copy(source_file, result_dir_path / filename)
+                shutil.copy(source_file, Path(result_dir) / filename)
         
         # Aktualizujeme slovník zpracovaných modelů
-        processed_models[text_model_id] = str(result_dir_path)
-        processed_models[vision_model_id] = str(result_dir_path)
-        processed_models[embedding_model_id] = str(result_dir_path)
+        processed_models[f"{config['text']['provider']}_{config['text']['model']}"] = result_dir
+        processed_models[f"{config['vision']['provider']}_{config['vision']['model']}"] = result_dir
+        processed_models[f"{config['embedding']['provider']}_{config['embedding']['model']}"] = result_dir
             
     except subprocess.CalledProcessError as e:
         print(f"Chyba při spuštění extrakce: {e}")
@@ -361,11 +264,14 @@ def combine_existing_results(text_model_dir: str, vision_model_dir: str, embeddi
     result_files = [
         "embedded_results.json",
         "vlm_results.json",
+        "text_results.json",  # Přidány výsledky textové pipeline
         "embedded_comparison.json",
         "vlm_comparison.json",
+        "text_comparison.json",  # Přidáno porovnání textové pipeline
         "semantic_comparison_results.json",
         "embedded_comparison_semantic.json",
         "vlm_comparison_semantic.json",
+        "text_comparison_semantic.json",  # Přidáno sémantické porovnání textové pipeline
         "comparison_results.png",
         "overall_results.png",
         "overall_results.csv",
@@ -438,8 +344,10 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
                 Path(result_dir) / "semantic_comparison_results.json",
                 Path(result_dir) / "embedded_comparison_semantic.json",
                 Path(result_dir) / "vlm_comparison_semantic.json",
+                Path(result_dir) / "text_comparison_semantic.json",  # Přidáno textové sémantické porovnání
                 Path(result_dir) / "embedded_comparison.json",
-                Path(result_dir) / "vlm_comparison.json"
+                Path(result_dir) / "vlm_comparison.json",
+                Path(result_dir) / "text_comparison.json"  # Přidáno textové porovnání
             ]
             
             found_results = False
@@ -458,6 +366,8 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
                         model_prefix = "VLM"
                     elif "embedded" in file_name.lower():
                         model_prefix = "EMBEDDED"
+                    elif "text" in file_name.lower():
+                        model_prefix = "TEXT"
                     else:
                         # Pokud nejde identifikovat z názvu souboru, použijeme název adresáře
                         model_prefix = dir_name.split('_')[0].upper()
@@ -611,19 +521,17 @@ def main():
     """Hlavní funkce skriptu."""
     args = parse_args()
     
+    # Zajistíme vytvoření konfiguračního souboru, pokud neexistuje
+    default_config_path = ensure_config_file()
+    
     # Načteme konfigurace
     if args.config:
         # Použijeme explicitně zadaný konfigurační soubor
         configurations = load_configurations_from_file(args.config)
     else:
         # Použijeme výchozí model_configs.json
-        default_config = CONFIG_DIR / "model_configs.json"
-        if default_config.exists():
-            print(f"Používám výchozí konfigurační soubor: {default_config}")
-            configurations = load_configurations_from_file(str(default_config))
-        else:
-            print(f"Výchozí konfigurační soubor {default_config} nenalezen, používám zabudované konfigurace.")
-            configurations = get_ollama_configurations()
+        print(f"Používám výchozí konfigurační soubor: {default_config_path}")
+        configurations = load_configurations_from_file(default_config_path)
     
     print(f"Načteno {len(configurations)} konfigurací modelů.")
     
@@ -637,9 +545,20 @@ def main():
     # Projdeme všechny konfigurace a spustíme extrakci
     for i, config in enumerate(configurations, 1):
         print(f"\nKonfigurace {i}/{len(configurations)}")
-        result_dir = prepare_result_directory(config.get("name", "unknown_config"))
-        result_dirs.append(result_dir)
-        run_extraction(config, args, processed_models)
+        
+        # Zajistíme, že konfigurace obsahuje povinné sekce
+        if 'text_pipeline' not in config:
+            config['text_pipeline'] = {
+                "enabled": True,
+                "max_text_length": 6000,
+                "extract_references": True,
+                "use_direct_pattern_extraction": True
+            }
+            print("Přidána chybějící konfigurace pro textovou pipeline")
+        
+        result_dir = run_extraction(config, args, processed_models)
+        if result_dir:
+            result_dirs.append(result_dir)
         
         # Aktualizace průběžných statistik po každém běhu
         create_final_comparison(result_dirs, is_final=False)

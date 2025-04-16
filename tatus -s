@@ -1,0 +1,41 @@
+[33mcommit dd3a560a01acb30a88db287cdf6a1f74d049ab51[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: PMikulecky <75887651+PMikulecky@users.noreply.github.com>
+Date:   Sun Apr 6 22:13:09 2025 +0200
+
+    Aktualizován README.md o nové závislosti pro vektorovou databázi a požadavky na knihovny. Přidány nové konfigurační soubory pro modely a implementace poskytovatelů AI. Vylepšena správa API klíčů a přidány nové funkce pro nastavení poskytovatelů. Vytvořeny nové soubory pro správu embeddingů a modelů. Opraveny importy a zlepšena struktura kódu.
+
+[33mcommit e55ff61ca52490fcdbc33f3f4cfe77dffb347c3c[m
+Author: PMikulecky <75887651+PMikulecky@users.noreply.github.com>
+Date:   Wed Mar 26 20:45:29 2025 +0100
+
+    Aktualizován README.md o nové komponenty pro sémantické porovnání a parametry příkazové řádky. Vylepšena funkce run_extraction_pipeline o možnost přeskočit sémantické porovnání. Přidány nové metody pro extrakci textu a konverzi PDF na obrázky v VLM pipeline. Opraveny importy a zlepšena správa chyb.
+
+[33mcommit 8530c2d5e5cb976dadb2b8bfe4819ba6fb747fff[m
+Author: PMikulecky <75887651+PMikulecky@users.noreply.github.com>
+Date:   Wed Mar 26 16:15:07 2025 +0100
+
+    Přidány další vzory pro ignorování datových souborů
+
+[33mcommit 3cc3d1c7c54aa82211c028a80b8778aa65c18e1d[m
+Author: PMikulecky <75887651+PMikulecky@users.noreply.github.com>
+Date:   Wed Mar 26 16:14:17 2025 +0100
+
+    Vylepšeno ignorování souborů, přidány .gitkeep pro zachování adresářové struktury
+
+[33mcommit 4ac2c829655462d37327e9f74c8294b5d25751a9[m
+Author: PMikulecky <75887651+PMikulecky@users.noreply.github.com>
+Date:   Wed Mar 26 16:12:15 2025 +0100
+
+    Přidán README.md
+
+[33mcommit ad19ebc544c25b718cf83b7d766c3357687230cf[m
+Author: PMikulecky <75887651+PMikulecky@users.noreply.github.com>
+Date:   Wed Mar 26 16:11:50 2025 +0100
+
+    Aktualizován .gitignore pro lepší správu virtuálních prostředí a ignorování download_log.txt
+
+[33mcommit baf310491bde5c0a1d78118ae00f79542b8b3262[m
+Author: PMikulecky <75887651+PMikulecky@users.noreply.github.com>
+Date:   Wed Mar 26 15:57:55 2025 +0100
+
+     Přidání souboru .gitignore

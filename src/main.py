@@ -17,11 +17,12 @@ import time
 import re  # Přidáno pro práci s regulárními výrazy
 
 # Import lokálních modulů
-from data_preparation import filter_papers_with_valid_doi
+from data_preparation import filter_papers_with_valid_doi_and_references as filter_papers_with_valid_doi
 from pdf_downloader import download_pdfs_for_filtered_papers
 from models.embedded_pipeline import extract_metadata_from_pdfs as extract_with_embedded
 # Dočasně zakomentováno kvůli problémům s importem
 from models.vlm_pipeline import extract_metadata_from_pdfs as extract_with_vlm
+from models.text_pipeline import extract_metadata_from_pdfs as extract_with_text
 from utils.metadata_comparator import compare_all_metadata, calculate_overall_metrics
 from utils.semantic_comparison import process_comparison_files
 # Import konfiguračního modulu
@@ -276,6 +277,45 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
                 print(f"Chyba při extrakci metadat pomocí VLM pipeline: {e}")
                 print(f"Podrobnosti chyby: {traceback.format_exc()}")
                 results['vlm'] = {}
+        
+        elif model == 'text':
+            print("\n=== Extrakce metadat pomocí textové pipeline ===")
+            print(f"Anthropic API klíč před extrakcí, začíná: {anthropic_key[:10]}..., délka: {len(anthropic_key)} znaků")
+            output_file = RESULTS_DIR / "text_results.json"
+            
+            try:
+                # Explicitní předání API klíče
+                from models.config.model_config import get_config
+                config = get_config()
+                text_config = config.get_text_config()
+                provider_name = text_config.get("provider")
+                model_name = text_config.get("model")
+                
+                print(f"Použití providera {provider_name} a modelu {model_name} z konfigurace")
+                
+                # Explicitní předání API klíče podle poskytovatele
+                api_key = None
+                if provider_name == "anthropic":
+                    api_key = anthropic_key
+                    print(f"Předávám explicitně Anthropic API klíč, začátek: {api_key[:10]}...")
+                elif provider_name == "openai":
+                    api_key = openai_key
+                    print(f"Předávám explicitně OpenAI API klíč, začátek: {api_key[:10]}...")
+                
+                results['text'] = extract_with_text(
+                    PDF_DIR, 
+                    output_file, 
+                    limit=limit, 
+                    force_extraction=force_extraction,
+                    provider_name=provider_name,
+                    model_name=model_name,
+                    api_key=api_key
+                )
+            except Exception as e:
+                import traceback
+                print(f"Chyba při extrakci metadat pomocí textové pipeline: {e}")
+                print(f"Podrobnosti chyby: {traceback.format_exc()}")
+                results['text'] = {}
     
     # 5. Porovnání výsledků s referenčními daty
     comparison_results = {}
@@ -309,9 +349,16 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
         if 'embedded' in comparison_files and os.path.exists(comparison_files['embedded']):
             embedded_comparison_path = comparison_files['embedded']
             
+            vlm_comparison_path = None
             if 'vlm' in comparison_files and os.path.exists(comparison_files['vlm']):
                 vlm_comparison_path = comparison_files['vlm']
+            
+            text_comparison_path = None
+            if 'text' in comparison_files and os.path.exists(comparison_files['text']):
+                text_comparison_path = comparison_files['text']
                 
+            # Pokračovat pouze pokud máme alespoň VLM nebo text pipeline
+            if vlm_comparison_path or text_comparison_path:
                 # Výstupní soubor pro sémantické porovnání
                 semantic_output = RESULTS_DIR / "semantic_comparison_results.json"
                 
@@ -319,30 +366,84 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
                 print("Provádím sémantické porovnání výsledků...")
                 try:
                     # Spuštění sémantického porovnání
-                    vlm_updated, embedded_updated = process_comparison_files(
-                        vlm_comparison_path, 
-                        embedded_comparison_path,
-                        semantic_output
-                    )
-                    
-                    # Uložení výsledků sémantického porovnání
-                    semantic_comparison_results = {
-                        'vlm': vlm_updated,
-                        'embedded': embedded_updated
-                    }
-                    
-                    # Nahrazení původních výsledků sémanticky vylepšenými
-                    comparison_results['vlm_semantic'] = vlm_updated
-                    comparison_results['embedded_semantic'] = embedded_updated
-                    
-                    print(f"Sémanticky vylepšené porovnání uloženo do {semantic_output}")
-                    print(f"Samostatné soubory uloženy jako:")
-                    print(f"- vlm_comparison_semantic.json")
-                    print(f"- embedded_comparison_semantic.json")
+                    if vlm_comparison_path and text_comparison_path:
+                        # Pokud máme všechny tři, použijeme všechny
+                        vlm_updated, embedded_updated, text_updated = process_comparison_files(
+                            vlm_comparison_path, 
+                            embedded_comparison_path,
+                            semantic_output,
+                            text_comparison_path
+                        )
+                        
+                        # Uložení výsledků sémantického porovnání
+                        semantic_comparison_results = {
+                            'vlm': vlm_updated,
+                            'embedded': embedded_updated,
+                            'text': text_updated
+                        }
+                        
+                        # Nahrazení původních výsledků sémanticky vylepšenými
+                        comparison_results['vlm_semantic'] = vlm_updated
+                        comparison_results['embedded_semantic'] = embedded_updated
+                        comparison_results['text_semantic'] = text_updated
+                        
+                        print(f"Sémanticky vylepšené porovnání uloženo do {semantic_output}")
+                        print(f"Samostatné soubory uloženy jako:")
+                        print(f"- vlm_comparison_semantic.json")
+                        print(f"- embedded_comparison_semantic.json")
+                        print(f"- text_comparison_semantic.json")
+                        
+                    elif vlm_comparison_path:
+                        # Pokud máme jen VLM a embedded
+                        vlm_updated, embedded_updated = process_comparison_files(
+                            vlm_comparison_path, 
+                            embedded_comparison_path,
+                            semantic_output
+                        )
+                        
+                        # Uložení výsledků sémantického porovnání
+                        semantic_comparison_results = {
+                            'vlm': vlm_updated,
+                            'embedded': embedded_updated
+                        }
+                        
+                        # Nahrazení původních výsledků sémanticky vylepšenými
+                        comparison_results['vlm_semantic'] = vlm_updated
+                        comparison_results['embedded_semantic'] = embedded_updated
+                        
+                        print(f"Sémanticky vylepšené porovnání uloženo do {semantic_output}")
+                        print(f"Samostatné soubory uloženy jako:")
+                        print(f"- vlm_comparison_semantic.json")
+                        print(f"- embedded_comparison_semantic.json")
+                        
+                    elif text_comparison_path:
+                        # Pokud máme jen text a embedded
+                        embedded_updated, text_updated = process_comparison_files(
+                            embedded_comparison_path,
+                            embedded_comparison_path,
+                            semantic_output,
+                            text_comparison_path
+                        )
+                        
+                        # Uložení výsledků sémantického porovnání
+                        semantic_comparison_results = {
+                            'embedded': embedded_updated,
+                            'text': text_updated
+                        }
+                        
+                        # Nahrazení původních výsledků sémanticky vylepšenými
+                        comparison_results['embedded_semantic'] = embedded_updated
+                        comparison_results['text_semantic'] = text_updated
+                        
+                        print(f"Sémanticky vylepšené porovnání uloženo do {semantic_output}")
+                        print(f"Samostatné soubory uloženy jako:")
+                        print(f"- embedded_comparison_semantic.json")
+                        print(f"- text_comparison_semantic.json")
+                        
                 except Exception as e:
                     print(f"Chyba při sémantickém porovnání: {e}")
             else:
-                print("Sémantické porovnání přeskočeno - chybí výsledky VLM modelu.")
+                print("Sémantické porovnání přeskočeno - chybí výsledky VLM nebo text modelu.")
         else:
             print("Sémantické porovnání přeskočeno - chybí výsledky Embedded modelu.")
     elif skip_semantic:
@@ -395,9 +496,11 @@ def visualize_results(comparison_results, include_semantic=False):
     colors = {
         'EMBEDDED': '#2B7AB8',  # Sytá modrá jako základ
         'VLM': '#E85D45',  # Sytá červená jako základ
+        'TEXT': '#4CAF50',  # Sytá zelená jako základ
         'semantic_improvement': {
             'EMBEDDED': '#8ECAE6',  # Světlá modrá pro sémantické zlepšení
-            'VLM': '#FFB5A7'  # Světlá červená pro sémantické zlepšení
+            'VLM': '#FFB5A7',  # Světlá červená pro sémantické zlepšení
+            'TEXT': '#A5D6A7'  # Světlá zelená pro sémantické zlepšení
         }
     }
 
@@ -430,14 +533,16 @@ def visualize_results(comparison_results, include_semantic=False):
         Patch(facecolor=colors['EMBEDDED'], label='EMBEDDED - základní'),
         Patch(facecolor=colors['semantic_improvement']['EMBEDDED'], label='EMBEDDED - sémantické zlepšení'),
         Patch(facecolor=colors['VLM'], label='VLM - základní'),
-        Patch(facecolor=colors['semantic_improvement']['VLM'], label='VLM - sémantické zlepšení')
+        Patch(facecolor=colors['semantic_improvement']['VLM'], label='VLM - sémantické zlepšení'),
+        Patch(facecolor=colors['TEXT'], label='TEXT - základní'),
+        Patch(facecolor=colors['semantic_improvement']['TEXT'], label='TEXT - sémantické zlepšení')
     ]
     
     if include_semantic:
         plt.legend(handles=legend_elements, loc='upper right')
     else:
         # Pokud není zahrnuto sémantické porovnání, zobrazit jen základní modely
-        plt.legend(handles=[legend_elements[0], legend_elements[2]], loc='upper right')
+        plt.legend(handles=[legend_elements[0], legend_elements[2], legend_elements[4]], loc='upper right')
     
     plt.tight_layout()
     
@@ -482,7 +587,7 @@ def visualize_results(comparison_results, include_semantic=False):
     if include_semantic:
         plt.legend(handles=legend_elements, loc='upper right')
     else:
-        plt.legend(handles=[legend_elements[0], legend_elements[2]], loc='upper right')
+        plt.legend(handles=[legend_elements[0], legend_elements[2], legend_elements[4]], loc='upper right')
     
     plt.tight_layout()
     
@@ -511,8 +616,8 @@ def main():
     """
     parser = argparse.ArgumentParser(description='Extrakce metadat z PDF souborů a porovnání výsledků.')
     parser.add_argument('--limit', type=int, default=None, help='Omezení počtu zpracovaných souborů')
-    parser.add_argument('--models', nargs='+', choices=['embedded', 'vlm'], default=['embedded'],
-                        help='Modely k použití (embedded, vlm)')
+    parser.add_argument('--models', nargs='+', choices=['embedded', 'vlm', 'text'], default=['embedded'],
+                        help='Modely k použití (embedded, vlm, text)')
     parser.add_argument('--year-filter', nargs='+', type=int, help='Filtrování článků podle roku')
     parser.add_argument('--verbose', '-v', action='store_true', help='Podrobnější výstup')
     parser.add_argument('--skip-download', action='store_true', help='Přeskočí stahování PDF souborů')

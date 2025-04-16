@@ -29,6 +29,12 @@ class ModelConfig:
         "embedding": {
             "provider": "openai",
             "model": "text-embedding-3-small"
+        },
+        "text_pipeline": {
+            "enabled": True,
+            "max_text_length": 6000,
+            "extract_references": True,
+            "use_direct_pattern_extraction": True
         }
     }
     
@@ -159,6 +165,33 @@ class ModelConfig:
         self.config["embedding"] = {
             "provider": provider,
             "model": model
+        }
+    
+    def get_text_pipeline_config(self) -> Dict[str, Any]:
+        """
+        Získá konfiguraci pro textovou pipeline.
+        
+        Returns:
+            Konfigurace pro textovou pipeline
+        """
+        return self.config.get("text_pipeline", self.DEFAULT_CONFIG["text_pipeline"])
+    
+    def set_text_pipeline_config(self, enabled=True, max_text_length=6000, 
+                                extract_references=True, use_direct_pattern_extraction=True) -> None:
+        """
+        Nastaví konfiguraci pro textovou pipeline.
+        
+        Args:
+            enabled (bool): Zda je pipeline povolena
+            max_text_length (int): Maximální délka textu pro dotazy
+            extract_references (bool): Zda extrahovat reference
+            use_direct_pattern_extraction (bool): Zda používat přímou extrakci pomocí vzorů
+        """
+        self.config["text_pipeline"] = {
+            "enabled": enabled,
+            "max_text_length": max_text_length,
+            "extract_references": extract_references,
+            "use_direct_pattern_extraction": use_direct_pattern_extraction
         }
     
     def get_available_providers(self) -> Dict[str, List[str]]:

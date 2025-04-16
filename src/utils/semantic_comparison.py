@@ -501,154 +501,384 @@ def compare_keywords(extracted, reference):
     return 1.0 if score > 0.7 else score
 
 
+def normalize_single_reference(ref):
+    """
+    Normalizuje jednu referenční položku pro porovnání.
+    Odstraní čísla na začátku, závorky a další formátovací znaky.
+    """
+    import re
+    
+    # Odstranění čísel na začátku a závorek (např. [1], (1), 1.)
+    ref = re.sub(r'^\s*[\[\(]?\d+[\]\)]?\.?\s*', '', ref.strip())
+    
+    # Odstranění DOI prefixů a URL
+    ref = re.sub(r'https?://(?:dx\.)?doi\.org/|doi:\s*', '', ref)
+    
+    # Odstranění dalších URL
+    ref = re.sub(r'https?://\S+', '', ref)
+    
+    # Odstranění diakritiky
+    ref = remove_diacritics(ref)
+    
+    # Převod na malá písmena a odstranění nadbytečných mezer
+    ref = ' '.join(ref.lower().split())
+    
+    return ref
+
+
+def split_references(references_text):
+    """
+    Rozdělí text s referencemi na jednotlivé citace.
+    """
+    import re
+    
+    # Zkusíme najít vzory pro rozdělení referencí
+    # Běžné vzory: [1] Autor..., 1. Autor..., (1) Autor...
+    if isinstance(references_text, list):
+        return references_text
+    
+    # Rozdělení podle běžných vzorů
+    patterns = [
+        r'(?:\[\d+\]|\(\d+\)|\d+\.)\s+',  # [1], (1), 1.
+        r'\n\s*(?=\[\d+\]|\(\d+\)|\d+\.)', # Nový řádek následovaný číslem
+        r'\r\n\s*(?=\[\d+\]|\(\d+\)|\d+\.)', # Windows nový řádek 
+        r'\n{2,}',  # Dvojité nové řádky
+    ]
+    
+    # Zkusíme každý vzor na rozdělení, dokud nedostaneme více než jednu položku
+    references = [references_text]
+    for pattern in patterns:
+        refs = re.split(pattern, references_text)
+        refs = [r.strip() for r in refs if r.strip()]
+        if len(refs) > 1:
+            references = refs
+            break
+    
+    return references
+
+
+def compare_references_with_llm(extracted_refs, reference_refs, max_refs=5):
+    """
+    Porovná reference pomocí LLM pro určení sémantické podobnosti.
+    Pro efektivitu omezíme počet porovnávaných referencí.
+    """
+    if not extracted_refs or not reference_refs:
+        return 0.0
+    
+    # Pro efektivitu porovnáme jen omezený počet referencí
+    extracted_sample = extracted_refs[:max_refs]
+    reference_sample = reference_refs[:max_refs]
+    
+    matched_count = 0
+    total_comparisons = min(len(extracted_sample), len(reference_sample))
+    
+    if total_comparisons == 0:
+        return 0.0
+    
+    for i, ext_ref in enumerate(extracted_sample):
+        if i >= len(reference_sample):
+            break
+            
+        ref_ref = reference_sample[i]
+        
+        prompt = f"""
+        Porovnej tyto dvě vědecké citace a rozhodni, zda se jedná o stejný zdroj, i když mohou být v jiném formátu:
+        
+        Citace 1: {ext_ref}
+        
+        Citace 2: {ref_ref}
+        
+        Vrať pouze 'true', pokud se jedná o stejný zdroj (stejní autoři, název, rok), nebo 'false', pokud jde o různé zdroje.
+        """
+        
+        try:
+            result = call_openai_api(prompt)
+            if "true" in result.lower():
+                matched_count += 1
+        except Exception as e:
+            print(f"Chyba při porovnávání referencí pomocí LLM: {e}")
+            # Fallback na textové porovnání
+            if compare_references_algorithmically(ext_ref, ref_ref) > 0.5:
+                matched_count += 1
+    
+    return matched_count / total_comparisons
+
+
+def compare_references_algorithmically(extracted, reference):
+    """
+    Algoritmické porovnání referencí bez použití LLM.
+    """
+    from difflib import SequenceMatcher
+    
+    # Normalizace textů
+    extracted_norm = normalize_single_reference(extracted)
+    reference_norm = normalize_single_reference(reference)
+    
+    # Základní podobnost textu
+    base_similarity = SequenceMatcher(None, extracted_norm, reference_norm).ratio()
+    
+    # Extrahujeme důležité části (autoři, rok, název)
+    import re
+    
+    # Hledání roku (4 číslice v závorce nebo za závorkou)
+    extracted_year = re.search(r'\(?(\d{4})\)?', extracted_norm)
+    reference_year = re.search(r'\(?(\d{4})\)?', reference_norm)
+    
+    year_match = False
+    if extracted_year and reference_year:
+        year_match = extracted_year.group(1) == reference_year.group(1)
+    
+    # Pokud se rok shoduje, zvýšíme váhu podobnosti
+    if year_match:
+        base_similarity = (base_similarity + 0.3) / 1.3
+    
+    return base_similarity
+
+
+def compare_references(extracted, reference, use_llm=True):
+    """
+    Sémantické porovnání referencí.
+    """
+    # Pokud jsou vstupy prázdné
+    if not extracted or not reference:
+        return 0.0
+    
+    # Rozdělení na jednotlivé reference
+    extracted_refs = split_references(extracted)
+    reference_refs = split_references(reference)
+    
+    # Pokud nemáme reference k porovnání
+    if not extracted_refs or not reference_refs:
+        return 0.0
+    
+    # Porovnání délky seznamů referencí (míra pokrytí)
+    len_similarity = min(len(extracted_refs), len(reference_refs)) / max(len(extracted_refs), len(reference_refs))
+    
+    # Porovnání obsahu bez ohledu na pořadí
+    if use_llm and os.getenv("OPENAI_API_KEY"):
+        try:
+            # Omezení počtu porovnávaných referencí pro LLM (kvůli efektivitě)
+            max_refs = 10
+            extracted_sample = extracted_refs[:max_refs]
+            reference_sample = reference_refs[:max_refs]
+            
+            # Matice podobností pro každý pár referencí
+            similarity_matrix = []
+            for ext_ref in extracted_sample:
+                row = []
+                for ref_ref in reference_sample:
+                    prompt = f"""
+                    Porovnej tyto dvě vědecké citace a rozhodni, zda se jedná o stejný zdroj, i když mohou být v jiném formátu:
+                    
+                    Citace 1: {ext_ref}
+                    
+                    Citace 2: {ref_ref}
+                    
+                    Vrať pouze 'true', pokud se jedná o stejný zdroj (stejní autoři, název, rok), nebo 'false', pokud jde o různé zdroje.
+                    """
+                    
+                    try:
+                        result = call_openai_api(prompt)
+                        score = 1.0 if "true" in result.lower() else 0.0
+                    except Exception as e:
+                        print(f"Chyba při porovnávání referencí pomocí LLM: {e}")
+                        # Fallback na algoritmické porovnání
+                        score = compare_references_algorithmically(ext_ref, ref_ref)
+                    
+                    row.append(score)
+                similarity_matrix.append(row)
+            
+            # Nalezení nejlepších shod pro každou extrahovanou referenci
+            # Použijeme "greedy" přístup - vždy vybereme nejlepší dostupnou shodu
+            matches = []
+            used_indices = set()
+            
+            for i, row in enumerate(similarity_matrix):
+                best_match_idx = -1
+                best_match_score = 0.0
+                
+                for j, score in enumerate(row):
+                    if j not in used_indices and score > best_match_score:
+                        best_match_score = score
+                        best_match_idx = j
+                
+                if best_match_idx != -1:
+                    matches.append(best_match_score)
+                    used_indices.add(best_match_idx)
+            
+            # Výpočet průměrné podobnosti nalezených shod
+            content_similarity = sum(matches) / len(extracted_sample) if extracted_sample else 0.0
+            
+        except Exception as e:
+            print(f"Chyba při použití LLM pro porovnání referencí: {e}")
+            use_llm = False
+    
+    if not use_llm:
+        # Algoritmické porovnání s hledáním nejlepších shod
+        similarity_matrix = []
+        for ext_ref in extracted_refs:
+            similarities = [compare_references_algorithmically(ext_ref, ref_ref) for ref_ref in reference_refs]
+            similarity_matrix.append(similarities)
+        
+        # Nalezení nejlepších shod pro každou extrahovanou referenci
+        matches = []
+        used_indices = set()
+        
+        for i, row in enumerate(similarity_matrix):
+            best_match_idx = -1
+            best_match_score = 0.5  # Práh pro považování za shodu
+            
+            for j, score in enumerate(row):
+                if j not in used_indices and score > best_match_score:
+                    best_match_score = score
+                    best_match_idx = j
+            
+            if best_match_idx != -1:
+                matches.append(best_match_score)
+                used_indices.add(best_match_idx)
+        
+        # Výpočet průměrné podobnosti nalezených shod
+        content_similarity = sum(matches) / len(extracted_refs) if extracted_refs else 0.0
+    
+    # Kombinujeme podobnost délky seznamu a obsahu s větší váhou na obsah
+    final_similarity = 0.3 * len_similarity + 0.7 * content_similarity
+    
+    return final_similarity
+
+
 def semantic_compare_and_update(comparison_data):
     """
-    Provede sémantické porovnání extrahovaných a referenčních hodnot 
-    a aktualizuje similarity skóre.
-    
-    Args:
-        comparison_data (dict): Data porovnání z JSON souborů
-        
-    Returns:
-        dict: Aktualizovaná data porovnání
+    Provede sémantické porovnání a aktualizuje hodnoty podobnosti.
     """
-    # Počítadla úprav pro statistiky
-    updates_count = {
-        "authors": 0,
-        "authors_llm": 0,  # Počet změn pomocí LLM
-        "authors_algo": 0, # Počet změn pomocí algoritmu
-        "doi": 0,
-        "journal": 0,
-        "publisher": 0,
-        "keywords": 0,
-        "total": 0
-    }
+    # Počítadla pro statistiky
+    authors_llm_count = 0
+    authors_algo_count = 0
+    authors_update_count = 0
+    doi_update_count = 0
+    journal_update_count = 0
+    publisher_update_count = 0
+    references_update_count = 0  # Nové počítadlo
+    total_updates = 0
     
-    # Projdeme všechny články
-    for paper_id, paper_data in comparison_data["comparison"].items():
-        # Autoři
-        if "authors" in paper_data and paper_data["authors"].get("similarity", 0) < 0.7:
-            extracted = paper_data["authors"].get("extracted", "")
-            reference = paper_data["authors"].get("reference", "")
+    # Kontrola, zda jsou k dispozici data pro porovnání
+    if "comparison" not in comparison_data:
+        return comparison_data
+    
+    # Procházení dokumentů
+    for doc_id, doc_data in comparison_data["comparison"].items():
+        # Porovnání a aktualizace autorů
+        if "authors" in doc_data:
+            orig_similarity = doc_data["authors"]["similarity"]
+            extracted = doc_data["authors"]["extracted"]
+            reference = doc_data["authors"]["reference"]
             
-            authors_match = False
-            llm_used = False
-            
-            # Nejprve zkusíme LLM porovnání, pokud je povoleno
-            if USE_LLM_FOR_AUTHORS and OPENAI_API_KEY and extracted and reference:
+            # Pokus o sémantické porovnání pomocí LLM
+            llm_match = False
+            if USE_LLM_FOR_AUTHORS and OPENAI_API_KEY:
                 try:
-                    print(f"Používám LLM pro porovnání autorů dokumentu {paper_id}...")
-                    authors_match = compare_authors_with_llm(extracted, reference)
-                    llm_used = True
-                    
-                    if authors_match:
-                        paper_data["authors"]["similarity"] = 1.0
-                        paper_data["authors"]["note"] = "Sémanticky shodné (LLM)"
-                        updates_count["authors"] += 1
-                        updates_count["authors_llm"] += 1
-                        updates_count["total"] += 1
-                        print(f"✓ LLM identifikoval shodné autory pro dokument {paper_id}")
-                    else:
-                        print(f"✗ LLM nenašel shodu autorů pro dokument {paper_id}")
-                
+                    llm_match = compare_authors_with_llm(extracted, reference)
+                    if llm_match:
+                        authors_llm_count += 1
+                        print(f"Dokument {doc_id}: LLM identifikoval shodné autory.")
                 except Exception as e:
-                    print(f"Chyba při LLM porovnání autorů pro paper_id={paper_id}: {e}")
-                    llm_used = False
+                    print(f"Chyba při porovnávání autorů pomocí LLM: {e}")
             
-            # Pokud LLM selhal nebo nenašel shodu, použijeme algoritmické porovnání
-            if not llm_used or not authors_match:
-                try:
-                    norm_extracted = normalize_authors(extracted)
-                    norm_reference = normalize_authors(reference)
-                    
-                    authors_match = compare_author_sets(norm_extracted, norm_reference)
-                    
-                    if authors_match:
-                        paper_data["authors"]["similarity"] = 1.0
-                        paper_data["authors"]["note"] = "Sémanticky shodné (algoritmus)"
-                        updates_count["authors"] += 1
-                        updates_count["authors_algo"] += 1
-                        updates_count["total"] += 1
-                except Exception as e:
-                    print(f"Chyba při algoritmickém porovnání autorů pro paper_id={paper_id}: {e}")
-        
-        # DOI
-        if "doi" in paper_data and paper_data["doi"].get("similarity", 0) < 0.9:
-            extracted = paper_data["doi"].get("extracted", "")
-            reference = paper_data["doi"].get("reference", "")
+            # Pokud LLM neidentifikoval shodu nebo není k dispozici, použijeme algoritmické porovnání
+            if not llm_match:
+                new_similarity = compare_author_sets(extracted, reference)
+                if new_similarity > orig_similarity:
+                    authors_algo_count += 1
+            else:
+                new_similarity = 1.0  # Pokud LLM identifikoval shodu, považujeme podobnost za 100%
             
-            if compare_dois(extracted, reference):
-                paper_data["doi"]["similarity"] = 1.0
-                paper_data["doi"]["note"] = "Sémanticky shodné (opraveno)"
-                updates_count["doi"] += 1
-                updates_count["total"] += 1
-        
-        # Časopis
-        if "journal" in paper_data and paper_data["journal"].get("similarity", 0) < 0.9:
-            extracted = paper_data["journal"].get("extracted", "")
-            reference = paper_data["journal"].get("reference", "")
-            
-            if compare_journals(extracted, reference):
-                paper_data["journal"]["similarity"] = 1.0
-                paper_data["journal"]["note"] = "Sémanticky shodné (opraveno)"
-                updates_count["journal"] += 1
-                updates_count["total"] += 1
+            # Aktualizace podobnosti, pokud je vyšší než původní
+            if new_similarity > orig_similarity:
+                doc_data["authors"]["similarity"] = new_similarity
+                doc_data["authors"]["semantically_identical"] = True
+                authors_update_count += 1
+                total_updates += 1
                 
-        # Vydavatel
-        if "publisher" in paper_data and paper_data["publisher"].get("similarity", 0) < 0.9:
-            extracted = paper_data["publisher"].get("extracted", "")
-            reference = paper_data["publisher"].get("reference", "")
+        # Porovnání a aktualizace DOI
+        if "doi" in doc_data:
+            orig_similarity = doc_data["doi"]["similarity"]
+            extracted = doc_data["doi"]["extracted"]
+            reference = doc_data["doi"]["reference"]
             
-            if compare_publishers(extracted, reference):
-                paper_data["publisher"]["similarity"] = 1.0
-                paper_data["publisher"]["note"] = "Sémanticky shodné (opraveno)"
-                updates_count["publisher"] += 1
-                updates_count["total"] += 1
+            new_similarity = compare_dois(extracted, reference)
+            if new_similarity > orig_similarity:
+                doc_data["doi"]["similarity"] = new_similarity
+                doc_data["doi"]["semantically_identical"] = True
+                doi_update_count += 1
+                total_updates += 1
         
-        # Klíčová slova
-        if "keywords" in paper_data and paper_data["keywords"].get("similarity", 0) < 0.9:
-            extracted = paper_data["keywords"].get("extracted", "")
-            reference = paper_data["keywords"].get("reference", "")
+        # Porovnání a aktualizace časopisu
+        if "journal" in doc_data:
+            orig_similarity = doc_data["journal"]["similarity"]
+            extracted = doc_data["journal"]["extracted"]
+            reference = doc_data["journal"]["reference"]
             
-            score = compare_keywords(extracted, reference)
-            if score == 1.0:
-                paper_data["keywords"]["similarity"] = 1.0
-                paper_data["keywords"]["note"] = "Sémanticky shodné (opraveno)"
-                updates_count["keywords"] += 1
-                updates_count["total"] += 1
-            elif score > paper_data["keywords"].get("similarity", 0):
-                paper_data["keywords"]["similarity"] = score
-                paper_data["keywords"]["note"] = "Sémanticky opraveno"
-                updates_count["keywords"] += 1
-                updates_count["total"] += 1
+            new_similarity = compare_journals(extracted, reference)
+            if new_similarity > orig_similarity:
+                doc_data["journal"]["similarity"] = new_similarity
+                doc_data["journal"]["semantically_identical"] = True
+                journal_update_count += 1
+                total_updates += 1
         
-        # Aktualizace celkového similarity skóre
-        if "overall_similarity" in paper_data:
-            # Vypočítáme průměr ze všech polí
-            similarities = [
-                data["similarity"] 
-                for field, data in paper_data.items() 
-                if field != "overall_similarity" and isinstance(data, dict) and "similarity" in data
-            ]
+        # Porovnání a aktualizace vydavatele
+        if "publisher" in doc_data:
+            orig_similarity = doc_data["publisher"]["similarity"]
+            extracted = doc_data["publisher"]["extracted"]
+            reference = doc_data["publisher"]["reference"]
             
-            if similarities:
-                paper_data["overall_similarity"] = np.mean(similarities)
+            new_similarity = compare_publishers(extracted, reference)
+            if new_similarity > orig_similarity:
+                doc_data["publisher"]["similarity"] = new_similarity
+                doc_data["publisher"]["semantically_identical"] = True
+                publisher_update_count += 1
+                total_updates += 1
+        
+        # Porovnání a aktualizace klíčových slov
+        if "keywords" in doc_data:
+            orig_similarity = doc_data["keywords"]["similarity"]
+            extracted = doc_data["keywords"]["extracted"]
+            reference = doc_data["keywords"]["reference"]
+            
+            new_similarity = compare_keywords(extracted, reference)
+            if new_similarity > orig_similarity:
+                doc_data["keywords"]["similarity"] = new_similarity
+                doc_data["keywords"]["semantically_identical"] = True
+                total_updates += 1
+        
+        # Nové porovnání pro reference
+        if "references" in doc_data:
+            orig_similarity = doc_data["references"]["similarity"]
+            extracted = doc_data["references"]["extracted"]
+            reference = doc_data["references"]["reference"]
+            
+            # Sémantické porovnání referencí
+            new_similarity = compare_references(extracted, reference)
     
-    # Výpis statistik aktualizací
-    print(f"\nProvedené sémantické aktualizace:")
-    for field, count in updates_count.items():
-        if field not in ["total", "authors_llm", "authors_algo"]:
-            print(f"- {field}: {count}x")
+            # Aktualizace podobnosti, pokud je vyšší než původní
+            if new_similarity > orig_similarity:
+                doc_data["references"]["similarity"] = new_similarity
+                doc_data["references"]["semantically_improved"] = True
+                references_update_count += 1
+                total_updates += 1
+                print(f"Dokument {doc_id}: Sémanticky vylepšené reference.")
     
-    # Detailnější výpis pro autory
-    if updates_count["authors"] > 0:
-        print(f"  • autoři pomocí LLM: {updates_count['authors_llm']}x")
-        print(f"  • autoři pomocí algoritmu: {updates_count['authors_algo']}x")
-    
-    print(f"Celkem provedeno {updates_count['total']} aktualizací")
-    
-    # Aktualizace celkových metrik
+    # Aktualizace metrik
     update_overall_metrics(comparison_data)
+    
+    # Výpis statistik
+    print(f"\nStatistiky sémantických aktualizací:")
+    print(f"Autoři aktualizováni: {authors_update_count}x")
+    print(f"DOI aktualizováno: {doi_update_count}x")
+    print(f"Časopis aktualizován: {journal_update_count}x")
+    print(f"Vydavatel aktualizován: {publisher_update_count}x")
+    print(f"Reference aktualizovány: {references_update_count}x")  # Nový výpis
+    print(f"Autoři identifikováni pomocí LLM: {authors_llm_count}x")
+    print(f"Autoři identifikováni pomocí algoritmu: {authors_algo_count}x")
+    print(f"Celkem provedeno aktualizací: {total_updates}")
     
     return comparison_data
 
@@ -765,7 +995,7 @@ def load_json_with_nan_handling(file_path):
             return {"comparison": {}, "metrics": {}}
 
 
-def process_comparison_files(vlm_comparison_path, embedded_comparison_path, output_path=None):
+def process_comparison_files(vlm_comparison_path, embedded_comparison_path, output_path=None, text_comparison_path=None):
     """
     Zpracuje soubory s porovnáním a vytvoří sémanticky vylepšené porovnání.
     
@@ -773,13 +1003,18 @@ def process_comparison_files(vlm_comparison_path, embedded_comparison_path, outp
         vlm_comparison_path (str): Cesta k souboru vlm_comparison.json
         embedded_comparison_path (str): Cesta k souboru embedded_comparison.json
         output_path (str, optional): Cesta pro výstupní soubor
+        text_comparison_path (str, optional): Cesta k souboru text_comparison.json
         
     Returns:
-        dict, dict: Dvojice aktualizovaných dat porovnání (vlm, embedded)
+        tuple: Aktualizovaná data porovnání (vlm, embedded, text) nebo (vlm, embedded) pokud text_comparison_path není zadán
     """
     # Načtení souborů s podporou pro NaN hodnoty
     vlm_data = load_json_with_nan_handling(vlm_comparison_path)
     embedded_data = load_json_with_nan_handling(embedded_comparison_path)
+    text_data = None
+    
+    if text_comparison_path and os.path.exists(text_comparison_path):
+        text_data = load_json_with_nan_handling(text_comparison_path)
     
     # Zpracování dat
     print("\nZpracování VLM dat...")
@@ -788,18 +1023,30 @@ def process_comparison_files(vlm_comparison_path, embedded_comparison_path, outp
     print("\nZpracování Embedded dat...")
     embedded_updated = semantic_compare_and_update(embedded_data)
     
+    text_updated = None
+    if text_data:
+        print("\nZpracování Text dat...")
+        text_updated = semantic_compare_and_update(text_data)
+    
     # Uložení výsledků
     if output_path:
         # Vytvoříme adresáře, pokud neexistují
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
         
-        # Uložíme výsledky do zadaného souboru
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump({
+        # Výsledky pro ukládání
+        result_data = {
                 "vlm": vlm_updated,
                 "embedded": embedded_updated
-            }, f, ensure_ascii=False, indent=2)
+        }
+        
+        # Přidáme text data, pokud existují
+        if text_updated:
+            result_data["text"] = text_updated
+        
+        # Uložíme výsledky do zadaného souboru
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(result_data, f, ensure_ascii=False, indent=2)
     
     # Vytvoříme samostatné aktualizované soubory
     vlm_output = str(vlm_comparison_path).replace('.json', '_semantic.json')
@@ -810,21 +1057,44 @@ def process_comparison_files(vlm_comparison_path, embedded_comparison_path, outp
     with open(embedded_output, 'w', encoding='utf-8') as f:
         json.dump(embedded_updated, f, ensure_ascii=False, indent=2)
     
-    return vlm_updated, embedded_updated
+    # Vytvoříme soubor text_semantic, pokud existují text data
+    if text_updated:
+        text_output = str(text_comparison_path).replace('.json', '_semantic.json')
+        with open(text_output, 'w', encoding='utf-8') as f:
+            json.dump(text_updated, f, ensure_ascii=False, indent=2)
+    
+    # Vracíme aktualizovaná data
+    if text_updated:
+        return vlm_updated, embedded_updated, text_updated
+    else:
+        return vlm_updated, embedded_updated
 
 
 if __name__ == "__main__":
     # Cesty k souborům
     vlm_comparison_path = RESULTS_DIR / "vlm_comparison.json"
     embedded_comparison_path = RESULTS_DIR / "embedded_comparison.json"
+    text_comparison_path = RESULTS_DIR / "text_comparison.json"
     output_path = RESULTS_DIR / "semantic_comparison_results.json"
     
+    # Kontrola, zda existuje text_comparison_path
+    text_param = text_comparison_path if os.path.exists(text_comparison_path) else None
+    
     # Zpracování
-    vlm_updated, embedded_updated = process_comparison_files(
-        vlm_comparison_path, 
-        embedded_comparison_path,
-        output_path
-    )
+    if text_param:
+        vlm_updated, embedded_updated, text_updated = process_comparison_files(
+            vlm_comparison_path, 
+            embedded_comparison_path,
+            output_path,
+            text_param
+        )
+        print(f"- {text_comparison_path.name.replace('.json', '_semantic.json')}")
+    else:
+        vlm_updated, embedded_updated = process_comparison_files(
+            vlm_comparison_path, 
+            embedded_comparison_path,
+            output_path
+        )
     
     print(f"\nSémanticky vylepšené porovnání uloženo do {output_path}")
     print(f"Samostatné soubory uloženy jako:")
