@@ -13,6 +13,7 @@ import requests
 from pathlib import Path
 from tqdm import tqdm
 from PIL import Image
+import time
 try:
     from pdf2image import convert_from_path
     PDF2IMAGE_AVAILABLE = True
@@ -210,22 +211,39 @@ class VLMPipeline:
             pdf_path (str): Cesta k PDF souboru
             
         Returns:
-            dict: Extrahovaná metadata
+            tuple(dict, float | None): Extrahovaná metadata a doba trvání extrakce v sekundách (nebo None při chybě)
         """
-        # Převod PDF na obrázky
-        images = self.convert_pdf_to_images(pdf_path)
-        
-        if not images:
-            print(f"Nepodařilo se převést PDF soubor {pdf_path} na obrázky")
-            return {}
-        
-        # Extrakce metadat
-        metadata = {}
-        for field in self.METADATA_FIELDS:
-            print(f"Extrahuji pole {field}...")
-            metadata[field] = self.extract_metadata_from_images(images, field)
-        
-        return metadata
+        start_time = time.perf_counter() # Měření času - START
+        paper_id = os.path.splitext(os.path.basename(pdf_path))[0]
+        print(f"Zpracovávám PDF soubor {pdf_path} (VLM)...")
+
+        try:
+            # Převod PDF na obrázky
+            images = self.convert_pdf_to_images(pdf_path)
+
+            if not images:
+                print(f"Nepodařilo se převést PDF soubor {pdf_path} na obrázky")
+                duration = time.perf_counter() - start_time # Měření času - END (i při chybě)
+                return {}, duration # Vrátit délku trvání i při chybě
+
+            # Extrakce metadat
+            metadata = {}
+            for field in self.METADATA_FIELDS:
+                print(f"Extrahuji pole {field}...")
+                try:
+                    metadata[field] = self.extract_metadata_from_images(images, field)
+                except Exception as e:
+                     print(f"Chyba při extrakci pole {field} pro {pdf_path}: {e}")
+                     metadata[field] = "" # Nebo jiná chybová hodnota
+
+            duration = time.perf_counter() - start_time # Měření času - END
+            print(f"Extrakce pro {paper_id} (VLM) trvala {duration:.2f} sekund.")
+            return metadata, duration
+        except Exception as e:
+             # Zachycení obecné chyby během zpracování (např. v convert_pdf_to_images)
+             print(f"Obecná chyba při zpracování PDF {pdf_path} v extract_metadata (VLM): {e}")
+             duration = time.perf_counter() - start_time
+             return {}, duration # Vrátit délku trvání i při chybě
     
     def convert_pdf_to_images(self, pdf_path, dpi=200):
         """
@@ -289,91 +307,91 @@ class VLMPipeline:
         
         Args:
             pdf_paths (list): Seznam cest k PDF souborům
-            output_file (str, optional): Cesta k výstupnímu souboru
+            output_file (str, optional): Cesta k výstupnímu souboru pro průběžné ukládání
             
         Returns:
-            dict: Extrahovaná metadata pro každý soubor
+            tuple(dict, dict): Slovník s extrahovanými metadaty a slovník s časy extrakce
         """
-        results = {}
-        
-        for pdf_path in tqdm(pdf_paths, desc="Extrakce metadat"):
+        all_extracted_data = {}
+        extraction_times = {} # Nový slovník pro časy
+
+        for pdf_path in tqdm(pdf_paths, desc="Extrakce metadat (VLM)"):
             paper_id = os.path.splitext(os.path.basename(pdf_path))[0]
-            print(f"\nZpracovávám PDF soubor {pdf_path} (ID: {paper_id})...")
-            
             try:
-                metadata = self.extract_metadata(pdf_path)
-                results[paper_id] = metadata
-                
-                # Průběžné ukládání výsledků
+                # Volání upravené metody extract_metadata
+                extracted_data, duration = self.extract_metadata(pdf_path)
+                all_extracted_data[paper_id] = extracted_data
+                # Uložení času (i pokud je None nebo při chybě)
+                extraction_times[paper_id] = duration
+
+                # Průběžné ukládání výsledků (pouze metadata)
                 if output_file:
+                    # Ošetření None hodnot před uložením do JSON
+                    save_data = {k: (v if v is not None else {"error": "Extraction failed"}) for k, v in all_extracted_data.items()}
                     with open(output_file, 'w', encoding='utf-8') as f:
-                        json.dump(results, f, ensure_ascii=False, indent=2)
+                        json.dump(save_data, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                print(f"Chyba při zpracování PDF souboru {pdf_path}: {e}")
-                results[paper_id] = {"error": str(e)}
-        
-        return results
+                 # Tato chyba by neměla nastat, pokud extract_metadata správně vrací duration
+                print(f"Neočekávaná chyba při zpracování PDF souboru {pdf_path} v extract_metadata_batch (VLM): {e}")
+                all_extracted_data[paper_id] = {"error": str(e)}
+                extraction_times[paper_id] = None # Explicitně None pro neočekávanou chybu
+
+        return all_extracted_data, extraction_times
 
 
 def extract_metadata_from_pdfs(pdf_dir, output_file, model_name=None, limit=None, provider_name=None, api_key=None, force_extraction=False):
     """
-    Hlavní funkce pro extrakci metadat z PDF souborů.
-    
-    Args:
-        pdf_dir (str): Cesta k adresáři s PDF soubory
-        output_file (str): Cesta k výstupnímu souboru
-        model_name (str, optional): Název modelu
-        limit (int, optional): Maximální počet PDF souborů ke zpracování
-        provider_name (str, optional): Název poskytovatele API
-        api_key (str, optional): API klíč
-        force_extraction (bool): Vynutí novou extrakci i když výsledky již existují
+    Hlavní funkce pro spuštění VLM pipeline pro extrakci metadat.
     """
-    # Inicializace pipeline
-    pipeline = VLMPipeline(
-        model_name=model_name,
-        provider_name=provider_name,
-        api_key=api_key
-    )
-    
+     # Zkontroluje, zda výsledky už existují
+    if os.path.exists(output_file) and not force_extraction:
+        print(f"Výsledky již existují v {output_file}. Přeskakuji extrakci.")
+        try:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                results = json.load(f)
+        except json.JSONDecodeError:
+             print(f"VAROVÁNÍ: Soubor {output_file} je poškozený. Vynucuji novou extrakci.")
+             results = None
+             force_extraction = True # Vynutit novou extrakci
+
+        if not force_extraction:
+            # Pokusíme se načíst i časy (pokud existují)
+            timing_output_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_timing.json"
+            if timing_output_file.exists():
+                 print(f"Načítám existující časy z {timing_output_file}")
+            return results # Vrátí pouze metadata
+
     # Získání seznamu PDF souborů
-    pdf_files = list(Path(pdf_dir).glob("*.pdf"))
-    
-    # Omezení počtu souborů ke zpracování
+    pdf_files = [os.path.join(pdf_dir, f) for f in os.listdir(pdf_dir) if f.endswith('.pdf')]
     if limit:
         pdf_files = pdf_files[:limit]
-    
-    # Vždy vytváříme nové výsledky bez ohledu na existenci souborů
-    print(f"Provádím novou extrakci metadat...")
-    results = {}
-    
-    # Extrakce metadat z PDF souborů
-    with tqdm(total=len(pdf_files), desc="Extrakce metadat") as pbar:
-        for pdf_file in pdf_files:
-            # Získání ID PDF z názvu souboru
-            pdf_id = pdf_file.stem
-            
-            print(f"\nZpracovávám PDF soubor {pdf_file} (ID: {pdf_id})...")
-            
-            try:
-                # Extrakce metadat z PDF souboru
-                metadata = pipeline.extract_metadata(pdf_file)
-                
-                # Uložení metadat do výsledků
-                results[pdf_id] = metadata
-                
-                # Uložení aktuálních výsledků (průběžné ukládání)
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    json.dump(results, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                print(f"Chyba při zpracování PDF {pdf_file}: {e}")
-            
-            pbar.update(1)
-    
-    # Uložení konečných výsledků
+
+    if not pdf_files:
+        print("Nebyly nalezeny žádné PDF soubory pro zpracování.")
+        return {}
+
+    # Inicializace pipeline
+    pipeline = VLMPipeline(model_name=model_name, provider_name=provider_name, api_key=api_key)
+
+    # Extrakce metadat
+    results, timings = pipeline.extract_metadata_batch(pdf_files, output_file) # Získání metadat i časů
+
+    # Uložení výsledků (metadata)
+    # Ošetření None hodnot před uložením do JSON
+    save_results = {k: (v if v is not None else {"error": "Extraction failed"}) for k, v in results.items()}
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-    
-    return results
+        json.dump(save_results, f, ensure_ascii=False, indent=2)
+    print(f"Výsledky extrakce (metadata) uloženy do {output_file}")
+
+    # Uložení časů do samostatného souboru
+    # Ošetření None hodnot pro časy
+    save_timings = {k: (v if v is not None else -1.0) for k, v in timings.items()} # -1 jako indikátor chyby
+    timing_output_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_timing.json"
+    with open(timing_output_file, 'w', encoding='utf-8') as f:
+        json.dump(save_timings, f, ensure_ascii=False, indent=2)
+    print(f"Výsledky extrakce (časy) uloženy do {timing_output_file}")
+
+    return results # Vrátí pouze metadata
 
 
 if __name__ == "__main__":

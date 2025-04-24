@@ -1,0 +1,65 @@
+[
+  {
+    "name": "gemini-1.5-pro-latest",
+    "text": {
+      "provider": "gemini",
+      "model": "gemini-1.5-pro"
+    },
+    "vision": {
+      "provider": "gemini",
+      "model": "gemini-1.5-pro-vision"
+    },
+    "embedding": {
+      "provider": "gemini",
+      "model": "text-embedding-004"
+    },
+    "text_pipeline": {
+      "enabled": true,
+      "max_text_length": 8000,
+      "extract_references": true,
+      "use_direct_pattern_extraction": true
+    }
+  },
+  {
+    "name": "gemini-1.5-pro",
+    "text": {
+      "provider": "gemini",
+      "model": "gemini-1.5-pro"
+    },
+    "vision": {
+      "provider": "gemini",
+      "model": "gemini-1.5-pro-vision"
+    },
+    "embedding": {
+      "provider": "gemini",
+      "model": "text-embedding-004"
+    },
+    "text_pipeline": {
+      "enabled": true,
+      "max_text_length": 8000,
+      "extract_references": true,
+      "use_direct_pattern_extraction": true
+    }
+  },
+  {
+    "name": "gemini-1.5-flash",
+    "text": {
+      "provider": "gemini",
+      "model": "gemini-1.5-flash"
+    },
+    "vision": {
+      "provider": "gemini",
+      "model": "gemini-1.5-flash-vision"
+    },
+    "embedding": {
+      "provider": "gemini",
+      "model": "text-embedding-004"
+    },
+    "text_pipeline": {
+      "enabled": true,
+      "max_text_length": 8000,
+      "extract_references": true,
+      "use_direct_pattern_extraction": true
+    }
+  }
+] 

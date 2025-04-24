@@ -6,6 +6,7 @@ Hlavní skript pro spuštění procesu extrakce metadat z PDF souborů a porovn�
 """
 
 import os
+import sys
 import json
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -15,6 +16,8 @@ from dotenv import load_dotenv
 import argparse
 import time
 import re  # Přidáno pro práci s regulárními výrazy
+import numpy as np # Přidáno pro výpočty
+import logging # Přidáno pro logování v pomocných funkcích
 
 # Import lokálních modulů
 from data_preparation import filter_papers_with_valid_doi_and_references as filter_papers_with_valid_doi
@@ -455,159 +458,524 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
     return comparison_results
 
 
+# Přidáno pro načítání dat z JSON
+def load_comparison_data(model_name, use_semantic=False):
+    """Načte data porovnání pro daný model."""
+    suffix = "_comparison_semantic.json" if use_semantic else "_comparison.json"
+    file_path = RESULTS_DIR / f"{model_name}{suffix}"
+    if file_path.exists():
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Chyba při načítání souboru {file_path}: {e}")
+            return None
+    else:
+        # Hledáme i v podadresářích, pokud je model vnořený (např. z run_all_models)
+        # Jednoduchý příklad - hledá v RESULTS_DIR/[model_name]/[model_name]_comparison...
+        nested_file_path = RESULTS_DIR / model_name / f"{model_name}{suffix}"
+        if nested_file_path.exists():
+            logging.info(f"Nalezen vnořený soubor výsledků: {nested_file_path}")
+            try:
+                with open(nested_file_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logging.error(f"Chyba při načítání vnořeného souboru {nested_file_path}: {e}")
+                return None
+        logging.warning(f"Soubor s výsledky {file_path} (ani vnořený) nebyl nalezen.")
+        return None
+
+
+def prepare_plotting_data(models, include_semantic):
+    """
+    Připraví data pro vykreslování ze souborů s výsledky porovnání a časů extrakce.
+    Vrací DataFrame pro detailní výsledky a DataFrame pro souhrnné výsledky.
+    """
+    logging.info(f"Spouštím prepare_plotting_data s modely: {models}, include_semantic: {include_semantic}")
+    all_data = []
+    detailed_scores = []
+    available_models = []
+
+    base_models = [m.replace('_semantic', '') for m in models]
+    base_models = sorted(list(set(base_models)))
+    logging.info(f"Zpracovávám základní modely: {base_models}")
+
+    for model in base_models:
+        logging.info(f"-- Zpracovávám model: {model} --")
+        logging.info(f"Načítám základní data pro {model}...")
+        base_data = load_comparison_data(model, use_semantic=False)
+        if not base_data or ("results" not in base_data and "comparison" not in base_data):
+            logging.warning(f"Nebyly nalezeny nebo jsou neúplné/nevalidní základní výsledky pro model {model}, model bude přeskočen.")
+            continue
+
+        # <<< Načtení časů extrakce >>>
+        timing_file_path = RESULTS_DIR / f"{model}_timing.json"
+        model_timings = {}
+        try:
+            if timing_file_path.exists():
+                with open(timing_file_path, 'r') as f:
+                    model_timings = json.load(f)
+                logging.info(f"Načten soubor s časy: {timing_file_path}")
+            else:
+                 # Hledání ve vnořeném adresáři
+                 nested_timing_path = RESULTS_DIR / model / f"{model}_timing.json"
+                 if nested_timing_path.exists():
+                     with open(nested_timing_path, 'r') as f:
+                         model_timings = json.load(f)
+                     logging.info(f"Nalezen vnořený soubor s časy: {nested_timing_path}")
+                 else:
+                     logging.warning(f"Soubor s časy {timing_file_path} (ani vnořený) nebyl nalezen pro model {model}.")
+        except Exception as e:
+             logging.error(f"Chyba při načítání souboru s časy {timing_file_path} (nebo vnořeného): {e}")
+        # <<< Konec načtení časů >>>
+
+        base_results_key = "results" if "results" in base_data else "comparison"
+        logging.debug(f"Klíč pro výsledky v base_data: {base_results_key}")
+        available_models.append(model.upper())
+
+        semantic_data = None
+        comparison_source = "base"
+        final_data_source = base_data
+        final_results_key = base_results_key
+
+        if include_semantic:
+            logging.info(f"Načítám sémantická data pro {model}...")
+            semantic_data = load_comparison_data(model, use_semantic=True)
+            if not semantic_data or ("results" not in semantic_data and "comparison" not in semantic_data):
+                logging.warning(f"Nebyly nalezeny nebo jsou neúplné/nevalidní sémantické výsledky pro model {model}, použijí se základní.")
+            else:
+                 semantic_results_key = "results" if "results" in semantic_data else "comparison"
+                 logging.debug(f"Klíč pro výsledky v semantic_data: {semantic_results_key}")
+                 comparison_source = "semantic"
+                 final_data_source = semantic_data
+                 final_results_key = semantic_results_key
+                 logging.info(f"Použiji sémantická data (klíč: {final_results_key}) pro {model}.")
+
+        logging.info(f"Počet dokumentů ve final_data_source ({comparison_source}, klíč: {final_results_key}) pro {model}: {len(final_data_source.get(final_results_key, {}))}")
+
+        docs_processed = 0
+        fields_processed = 0
+        # Procházíme klíče dokumentů z finálního zdroje dat (může být base nebo semantic)
+        doc_ids_to_process = list(final_data_source.get(final_results_key, {}).keys())
+        logging.info(f"Nalezeno {len(doc_ids_to_process)} ID dokumentů ke zpracování.")
+        
+        for doc_id in doc_ids_to_process:
+            doc_results = final_data_source.get(final_results_key, {}).get(doc_id)
+            
+            # Kontrola, zda máme výsledky pro tento dokument
+            if not doc_results:
+                logging.warning(f"Přeskakuji doc_id {doc_id}, nenalezeny výsledky ve final_data_source.")
+                continue
+
+            docs_processed += 1
+            doc_comparison = {}
+            if isinstance(doc_results, dict) and "comparison" in doc_results:
+                doc_comparison = doc_results.get("comparison", {})
+            elif isinstance(doc_results, dict):
+                 doc_comparison = doc_results
+                 logging.debug(f"Dokument {doc_id} nemá klíč 'comparison', používám přímo obsah.")
+            else:
+                logging.warning(f"Neočekávaný formát pro doc_results u {doc_id}: {type(doc_results)}. Přeskakuji dokument.")
+                continue
+
+            if not doc_comparison:
+                logging.debug(f"Dokument {doc_id} neobsahuje data pro porovnání. Přeskakuji.")
+                continue
+
+            # <<< Získání času pro dokument >>>
+            # Používáme str(doc_id) pro konzistenci s JSON klíči
+            duration = model_timings.get(str(doc_id))
+            if duration is None or duration < 0: # Zahrnuje i náš indikátor chyby -1.0
+                logging.debug(f"Čas pro dokument {doc_id} modelu {model} nebyl nalezen nebo je neplatný ({duration}). Nastavuji na NaN.")
+                duration = np.nan # Použít NaN pro chybějící/neplatné časy
+            # <<< Konec získání času >>>
+
+            # Iterujeme přes pole definovaná ve třídě, ne přes výsledky (kvůli konzistenci)
+            # Předpokládáme, že METADATA_FIELDS jsou definována někde globálně nebo importována
+            # Pokud ne, museli bychom je získat jinak (např. z prvního dokumentu)
+            defined_fields = [
+                'title', 'authors', 'abstract', 'keywords', 'doi', 'year',
+                'journal', 'volume', 'issue', 'pages', 'publisher', 'references'
+            ] # TODO: Možná lépe načíst dynamicky?
+            
+            for field in defined_fields:
+                scores_or_value = doc_comparison.get(field)
+                similarity = 0
+                
+                # Zpracování hodnoty - může být dict nebo float
+                if isinstance(scores_or_value, dict):
+                    similarity = scores_or_value.get("similarity", 0)
+                elif isinstance(scores_or_value, (float, int)):
+                    similarity = float(scores_or_value)
+                # Pokud pole chybí v porovnání, similarity zůstane 0
+                elif scores_or_value is None:
+                    logging.debug(f"Pole '{field}' chybí v porovnání pro doc_id {doc_id}. Similarity bude 0.")
+                else:
+                    logging.warning(f"Neočekávaný typ hodnoty pro pole {field} u {doc_id}: {type(scores_or_value)}. Similarity bude 0.")
+                
+                fields_processed += 1 # Počítáme i pole s nulovou podobností
+
+                detailed_scores.append({
+                    "doc_id": str(doc_id), # Ukládat jako string
+                    "model": model.upper(),
+                    "field": field,
+                    "similarity": similarity,
+                    "source": comparison_source,
+                    "duration": duration # Přidáno (bude NaN pokud čas chybí)
+                })
+
+                # Získání základního skóre (musí také zvládnout oba formáty a chybějící pole)
+                base_similarity_score = 0
+                try:
+                    base_doc_data = base_data.get(base_results_key, {}).get(str(doc_id), {})
+                    base_comparison_data = {}
+                    if isinstance(base_doc_data, dict) and "comparison" in base_doc_data:
+                         base_comparison_data = base_doc_data.get("comparison", {})
+                    elif isinstance(base_doc_data, dict): # Přímý přístup
+                         base_comparison_data = base_doc_data
+
+                    base_scores_or_value = base_comparison_data.get(field)
+                    if isinstance(base_scores_or_value, dict):
+                        base_similarity_score = base_scores_or_value.get("similarity", 0)
+                    elif isinstance(base_scores_or_value, (float, int)):
+                        base_similarity_score = float(base_scores_or_value)
+                except Exception as e:
+                    logging.debug(f"Chyba při hledání základního skóre pro {doc_id}/{field}: {e}")
+
+                semantic_improvement = max(0, similarity - base_similarity_score) if comparison_source == "semantic" else 0
+
+                all_data.append({
+                    "doc_id": str(doc_id), # Ukládat jako string
+                    "Model": model.upper(),
+                    "Field": field,
+                    "Base_Similarity": base_similarity_score,
+                    "Semantic_Improvement": semantic_improvement,
+                    "Total_Similarity": similarity,
+                    "Duration": duration # Přidáno (bude NaN pokud čas chybí)
+                })
+        logging.info(f"Pro model {model} zpracováno {docs_processed} dokumentů a {fields_processed} záznamů polí (včetně chybějících).")
+
+    if not all_data:
+        logging.error("Chyba: Nebyla nalezena žádná data k vizualizaci po zpracování všech modelů.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    logging.info(f"Celkem záznamů pro agregaci: {len(all_data)}")
+    logging.info(f"Celkem záznamů pro detailní skóre: {len(detailed_scores)}")
+
+    plot_df_agg = pd.DataFrame(all_data)
+    detailed_scores_df = pd.DataFrame(detailed_scores)
+
+    if plot_df_agg.empty or detailed_scores_df.empty:
+         logging.error("Vytvořené DataFrames jsou prázdné.")
+         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    # --- Výpočet statistik pro graf porovnání polí ---
+    try:
+        # Vyloučit řádky s NaN duration pro výpočet statistik času, pokud je to žádoucí
+        # summary_stats_timed = plot_df_agg.dropna(subset=['Duration'])
+        # Nebo ponechat a NaN se budou ignorovat při mean/std
+        summary_stats = plot_df_agg.groupby(['Model', 'Field']).agg(
+            Mean_Base=('Base_Similarity', 'mean'),
+            Mean_Improvement=('Semantic_Improvement', 'mean'),
+            Std_Total=('Total_Similarity', 'std'),
+            Mean_Total=('Total_Similarity', 'mean')
+            # Mean_Duration=('Duration', 'mean') # Průměrný čas na pole nedává moc smysl
+        ).reset_index()
+        summary_stats.fillna({'Std_Total': 0}, inplace=True)
+        logging.info(f"Vytvořen summary_stats DataFrame s {len(summary_stats)} řádky.")
+        # logging.debug(f"Náhled summary_stats:\n{summary_stats.head().to_string()}")
+    except Exception as e:
+        logging.error(f"Chyba při agregaci summary_stats: {e}")
+        summary_stats = pd.DataFrame()
+
+
+    # --- Výpočet statistik pro celkový graf (včetně času) ---
+    try:
+        # <<< Změna: Přidat agregaci času na úrovni dokumentu >>>
+        # Agregujeme podobnost a vezmeme PRVNÍ platnou hodnotu času pro daný dokument/model
+        # Protože čas by měl být stejný pro všechna pole daného dokumentu
+        overall_per_doc = plot_df_agg.groupby(['Model', 'doc_id']).agg(
+            Doc_Base_Overall=('Base_Similarity', 'mean'),
+            Doc_Total_Overall=('Total_Similarity', 'mean'),
+            Duration=('Duration', 'first') # Vezmeme první hodnotu (měla by být stejná, nebo NaN)
+        ).reset_index()
+
+        # Nyní agregujeme průměry a směrodatné odchylky přes všechny dokumenty pro každý model
+        overall_summary = overall_per_doc.groupby('Model').agg(
+            Mean_Base_Overall=('Doc_Base_Overall', 'mean'),
+            Std_Base_Overall=('Doc_Base_Overall', 'std'),
+            Mean_Total_Overall=('Doc_Total_Overall', 'mean'),
+            Std_Total_Overall=('Doc_Total_Overall', 'std'),
+            Mean_Duration=('Duration', 'mean'),  # Průměrný čas na dokument (ignoruje NaN)
+            Std_Duration=('Duration', 'std')     # Směrodatná odchylka času (ignoruje NaN)
+        ).reset_index()
+
+        overall_summary['Mean_Improvement'] = overall_summary['Mean_Total_Overall'] - overall_summary['Mean_Base_Overall']
+        # Doplnění chybějících std dev (pokud byl jen jeden dokument nebo všechny časy byly NaN)
+        overall_summary.fillna({
+            'Std_Base_Overall': 0,
+            'Std_Total_Overall': 0,
+            'Std_Duration': 0
+        }, inplace=True)
+        # <<< Konec změny >>>
+        logging.info(f"Vytvořen overall_summary DataFrame s {len(overall_summary)} řádky.")
+        # logging.debug(f"Náhled overall_summary:\n{overall_summary.to_string()}")
+    except Exception as e:
+        logging.error(f"Chyba při agregaci overall_summary: {e}")
+        overall_summary = pd.DataFrame()
+
+
+    # logging.debug(f"Náhled detailed_scores_df:\n{detailed_scores_df.head().to_string()}")
+
+    # <<< PŘIDÁNO LOGOVÁNÍ VÝSTUPNÍCH DATAFRAMES >>>
+    logging.info("--- Výstupní DataFrames pro vizualizaci ---")
+    try:
+        logging.info(f"summary_stats HEAD:\n{summary_stats.head().to_string()}")
+    except Exception as log_e:
+        logging.error(f"Chyba při logování summary_stats: {log_e}")
+    try:
+        logging.info(f"overall_summary:\n{overall_summary.to_string()}")
+    except Exception as log_e:
+        logging.error(f"Chyba při logování overall_summary: {log_e}")
+    # Logování detailed_scores může být příliš velké, vynecháme
+    # try:
+    #     logging.info(f"detailed_scores_df HEAD:\n{detailed_scores_df.head().to_string()}")
+    # except Exception as log_e:
+    #      logging.error(f"Chyba při logování detailed_scores_df: {log_e}")
+    logging.info("-------------------------------------------")
+    # <<< KONEC LOGOVÁNÍ >>>
+
+    return summary_stats, overall_summary, detailed_scores_df
+
+
+# Přidáno pro vykreslení box plotu porovnání polí
+def plot_comparison_boxplot(detailed_df, filename="comparison_results_boxplot.png"):
+    """Vykreslí box plot pro porovnání výsledků podle polí."""
+    if detailed_df.empty:
+        print("Přeskakuji vykreslení box plotu pro porovnání polí - žádná data.")
+        return
+
+    plt.figure(figsize=(18, 10)) # Větší graf
+    sns.boxplot(data=detailed_df, x='field', y='similarity', hue='model', palette='viridis')
+    plt.title('Distribuce skóre podobnosti podle polí a modelů')
+    plt.xlabel('Pole metadat')
+    plt.ylabel('Skóre podobnosti')
+    plt.xticks(rotation=45, ha='right')
+    plt.legend(title='Model', bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.ylim(0, 1.05)
+    plt.tight_layout(rect=[0, 0, 0.85, 1]) # Upravit layout pro legendu mimo
+    filepath = RESULTS_DIR / filename
+    try:
+        plt.savefig(filepath)
+        print(f"Box plot porovnání polí uložen do {filepath}")
+    except Exception as e:
+        print(f"Chyba při ukládání grafu {filepath}: {e}")
+    plt.close()
+
+# Přidáno pro vykreslení celkového box plotu
+def plot_overall_boxplot(detailed_df, filename="overall_results_boxplot.png"):
+    """Vykreslí box plot pro celkové porovnání modelů."""
+    if detailed_df.empty:
+        print("Přeskakuji vykreslení celkového box plotu - žádná data.")
+        return
+
+    # Spočítat celkové skóre pro každý dokument a model (průměr přes pole)
+    overall_scores = detailed_df.groupby(['doc_id', 'model'])['similarity'].mean().reset_index()
+
+    plt.figure(figsize=(10, 6))
+    # Oprava FutureWarning - explicitně nastavit hue a vypnout legendu
+    sns.boxplot(data=overall_scores, x='model', y='similarity', hue='model', palette='viridis', legend=False)
+    plt.title('Distribuce celkového skóre podobnosti podle modelů')
+    plt.xlabel('Model')
+    plt.ylabel('Průměrné skóre podobnosti dokumentu')
+    plt.ylim(0, 1.05)
+    plt.tight_layout()
+    filepath = RESULTS_DIR / filename
+    try:
+        plt.savefig(filepath)
+        print(f"Celkový box plot uložen do {filepath}")
+    except Exception as e:
+        print(f"Chyba při ukládání grafu {filepath}: {e}")
+    plt.close()
+
 def visualize_results(comparison_results, include_semantic=False):
     """
-    Vizualizuje výsledky porovnání.
-    
-    Args:
-        comparison_results (dict): Výsledky porovnání
-        include_semantic (bool): Zda zahrnout i sémanticky vylepšené výsledky
+    Vykreslí porovnání výsledků modelů s error bary a box ploty.
     """
-    print("\n=== Vizualizace výsledků ===")
-    
-    # Příprava dat pro vizualizaci
-    models = [model for model in comparison_results.keys() if not model.endswith('_semantic')]
-    
-    if len(models) == 0:
-        print("Nejsou k dispozici žádné modely pro vizualizaci.")
-        return
-    
-    fields = comparison_results[models[0]]['metrics'].keys()
-    
-    # Vytvoření DataFrame pro vizualizaci
-    data = []
-    
-    for field in fields:
-        if field != 'overall':
-            for model in models:
-                base_similarity = comparison_results[model]['metrics'][field]['mean']
-                semantic_similarity = comparison_results.get(f"{model}_semantic", {}).get('metrics', {}).get(field, {}).get('mean', base_similarity)
-                
-                data.append({
-                    'Model': model.upper(),
-                    'Field': field,
-                    'Base_Similarity': base_similarity,
-                    'Semantic_Improvement': max(0, semantic_similarity - base_similarity)  # Zajistí, že improvement nebude záporný
-                })
-    
-    df = pd.DataFrame(data)
-    
-    # Definice barev
-    colors = {
-        'EMBEDDED': '#2B7AB8',  # Sytá modrá jako základ
-        'VLM': '#E85D45',  # Sytá červená jako základ
-        'TEXT': '#4CAF50',  # Sytá zelená jako základ
-        'semantic_improvement': {
-            'EMBEDDED': '#8ECAE6',  # Světlá modrá pro sémantické zlepšení
-            'VLM': '#FFB5A7',  # Světlá červená pro sémantické zlepšení
-            'TEXT': '#A5D6A7'  # Světlá zelená pro sémantické zlepšení
-        }
-    }
+    summary_stats, overall_summary, detailed_scores_df = prepare_plotting_data(list(comparison_results.keys()), include_semantic)
 
-    # Vytvoření grafu
-    plt.figure(figsize=(14, 10))
-    
-    # Vykreslení základních sloupců
-    base_bars = plt.bar(df.index, df['Base_Similarity'], 
-                       color=[colors[model] for model in df['Model']])
-    
-    # Vykreslení sémantického zlepšení nad základními sloupci
-    if include_semantic:
-        semantic_bars = plt.bar(df.index, df['Semantic_Improvement'],
-                              bottom=df['Base_Similarity'],
-                              color=[colors['semantic_improvement'][model] for model in df['Model']])
-    
-    # Nastavení popisků osy x
-    plt.xticks(range(len(df)), 
-               [f"{row['Field']}\n({row['Model']})" for _, row in df.iterrows()],
-               rotation=45, ha='right')
-    
-    plt.title('Porovnání úspěšnosti modelů v extrakci metadat')
-    plt.xlabel('Pole metadat a model')
+    if summary_stats.empty or overall_summary.empty:
+        print("Nelze vykreslit grafy - chybí data.")
+        return
+
+    model_names = overall_summary['Model'].unique()
+    if len(model_names) == 0:
+        print("Žádné modely s daty pro vizualizaci.")
+        return
+
+    # Definice barev
+    base_colors = {
+        'EMBEDDED': 'skyblue',
+        'VLM': 'lightcoral',
+        'TEXT': 'lightgreen',
+    }
+    # <<< ZMĚNA: Definice světlejších barev pro sémantické zlepšení >>>
+    lighter_semantic_colors = {
+        'EMBEDDED': 'lightsteelblue', # Světlejší než steelblue
+        'VLM': 'salmon',           # Světlejší než indianred
+        'TEXT': 'palegreen'        # Světlejší než seagreen
+    }
+    # Použít jen barvy pro modely, které máme
+    colors = {m: base_colors.get(m, 'grey') for m in model_names}
+    # Nepotřebujeme colors['semantic_improvement'] v této podobě
+
+
+    # --- Graf porovnání polí (s error bary) ---
+    plt.figure(figsize=(18, 10))
+
+    fields = sorted(summary_stats['Field'].unique())
+    n_models = len(model_names)
+    x = np.arange(len(fields))
+    width = 0.8 / n_models
+
+    for i, model_name in enumerate(model_names):
+        model_data = summary_stats[(summary_stats['Model'] == model_name)].set_index('Field').reindex(fields).reset_index()
+        positions = x - (width * n_models / 2) + (i * width) + width / 2
+
+        # <<< ZMĚNA: Vykreslení sloupců a error barů zvlášť >>>
+        # 1. Základní sloupec
+        plt.bar(positions, model_data['Mean_Base'], width,
+                label=f'{model_name} - základní' if i == 0 else "",
+                color=colors[model_name]) # Základní barva
+
+        # 2. Sémantické zlepšení (pokud je)
+        if include_semantic:
+            plt.bar(positions, model_data['Mean_Improvement'], width,
+                    bottom=model_data['Mean_Base'], # Navazuje na základní
+                    label=f'{model_name} - sém. zlepšení' if i == 0 else "",
+                    color=lighter_semantic_colors.get(model_name, 'lightgrey')) # Světlejší barva
+
+        # 3. Chybové úsečky pro celkovou výšku
+        total_heights = model_data['Mean_Total'] # Průměrná celková výška
+        errors = model_data['Std_Total'].fillna(0) # Směrodatná odchylka celkové výšky
+        plt.errorbar(positions, total_heights, yerr=errors, fmt='none',
+                     ecolor='black', capsize=4) # Černé error bary
+        # <<< KONEC ZMĚNY vykreslení sloupců >>>
+
+    plt.xlabel('Pole metadat')
     plt.ylabel('Průměrná podobnost')
-    plt.ylim(0, 1.05)
-    
-    # Vytvoření vlastní legendy s informacemi o obou modelech
+    plt.title('Porovnání úspěšnosti modelů v extrakci metadat (s chybovými úsečkami ±1σ celk. skóre)')
+    plt.xticks(x, fields, rotation=45, ha='right')
+    plt.ylim(0, 1.1)
+
+    # <<< ZMĚNA: Aktualizace legendy >>>
     from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor=colors['EMBEDDED'], label='EMBEDDED - základní'),
-        Patch(facecolor=colors['semantic_improvement']['EMBEDDED'], label='EMBEDDED - sémantické zlepšení'),
-        Patch(facecolor=colors['VLM'], label='VLM - základní'),
-        Patch(facecolor=colors['semantic_improvement']['VLM'], label='VLM - sémantické zlepšení'),
-        Patch(facecolor=colors['TEXT'], label='TEXT - základní'),
-        Patch(facecolor=colors['semantic_improvement']['TEXT'], label='TEXT - sémantické zlepšení')
-    ]
-    
-    if include_semantic:
-        plt.legend(handles=legend_elements, loc='upper right')
-    else:
-        # Pokud není zahrnuto sémantické porovnání, zobrazit jen základní modely
-        plt.legend(handles=[legend_elements[0], legend_elements[2], legend_elements[4]], loc='upper right')
-    
-    plt.tight_layout()
-    
-    # Uložení grafu
-    plt.savefig(RESULTS_DIR / "comparison_results.png")
-    print(f"Graf uložen do {RESULTS_DIR / 'comparison_results.png'}")
-    
-    # Vytvoření grafu pro celkové výsledky
+    legend_elements = []
+    for model_name in model_names:
+         legend_elements.append(Patch(facecolor=colors[model_name], label=f'{model_name} - základní'))
+         if include_semantic:
+             legend_elements.append(Patch(facecolor=lighter_semantic_colors.get(model_name, 'lightgrey'), label=f'{model_name} - sém. zlepšení'))
+    plt.legend(handles=legend_elements, title="Model & Typ skóre", bbox_to_anchor=(1.05, 1), loc='upper left')
+    # <<< KONEC ZMĚNY legendy >>>
+
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
+    filepath = RESULTS_DIR / "comparison_results.png"
+    try:
+        plt.savefig(filepath)
+        print(f"Graf porovnání polí uložen do {filepath}")
+    except Exception as e:
+        print(f"Chyba při ukládání grafu {filepath}: {e}")
+    plt.close()
+
+    # --- Graf celkových výsledků (s error bary) ---
     plt.figure(figsize=(10, 6))
-    
-    # Příprava dat pro celkové výsledky
-    overall_data = []
-    for model in models:
-        base_overall = comparison_results[model]['metrics']['overall']['mean']
-        semantic_overall = comparison_results.get(f"{model}_semantic", {}).get('metrics', {}).get('overall', {}).get('mean', base_overall)
-        
-        overall_data.append({
-            'Model': model.upper(),
-            'Base_Overall': base_overall,
-            'Semantic_Improvement': max(0, semantic_overall - base_overall)
-        })
-    
-    overall_df = pd.DataFrame(overall_data)
-    
-    # Vykreslení základních sloupců pro celkové výsledky
-    base_bars = plt.bar(overall_df.index, overall_df['Base_Overall'],
-                       color=[colors[model] for model in overall_df['Model']])
-    
-    # Vykreslení sémantického zlepšení pro celkové výsledky
+    x_overall = np.arange(len(model_names))
+
+    # <<< ZMĚNA: Vykreslení celkových sloupců a error barů zvlášť (pro konzistenci a jasnější barvu) >>>
+    # 1. Základní sloupec
+    plt.bar(x_overall, overall_summary['Mean_Base_Overall'],
+             color=[colors.get(m, 'grey') for m in overall_summary['Model']])
+
+    # 2. Sémantické zlepšení (pokud je)
     if include_semantic:
-        semantic_bars = plt.bar(overall_df.index, overall_df['Semantic_Improvement'],
-                              bottom=overall_df['Base_Overall'],
-                              color=[colors['semantic_improvement'][model] for model in overall_df['Model']])
-    
-    plt.xticks(range(len(overall_df)), overall_df['Model'])
-    plt.title('Celková úspěšnost modelů v extrakci metadat')
+        plt.bar(x_overall, overall_summary['Mean_Improvement'],
+                bottom=overall_summary['Mean_Base_Overall'], # Navazuje na základní
+                color=[lighter_semantic_colors.get(m, 'lightgrey') for m in overall_summary['Model']])
+
+    # 3. Chybové úsečky pro celkovou výšku
+    total_heights_overall = overall_summary['Mean_Total_Overall']
+    errors_overall = overall_summary['Std_Total_Overall'].fillna(0)
+    plt.errorbar(x_overall, total_heights_overall, yerr=errors_overall, fmt='none',
+                 ecolor='black', capsize=5) # Černé error bary
+    # <<< KONEC ZMĚNY vykreslení celkových sloupců >>>
+
     plt.xlabel('Model')
     plt.ylabel('Průměrná celková podobnost')
-    plt.ylim(0, 1.05)
-    
-    # Využití stejné legendy i pro celkové výsledky
-    if include_semantic:
-        plt.legend(handles=legend_elements, loc='upper right')
-    else:
-        plt.legend(handles=[legend_elements[0], legend_elements[2], legend_elements[4]], loc='upper right')
-    
+    plt.title('Celková úspěšnost modelů (průměr ±1σ celk. skóre)')
+    plt.xticks(x_overall, overall_summary['Model'])
+    plt.ylim(0, 1.1)
+    # Legenda zde není nutná, protože ji máme v detailním grafu
+    plt.legend().set_visible(False)
     plt.tight_layout()
-    
-    # Uložení grafu celkových výsledků
-    plt.savefig(RESULTS_DIR / "overall_results.png")
-    print(f"Graf celkových výsledků uložen do {RESULTS_DIR / 'overall_results.png'}")
-    
-    # Uložení výsledků do CSV souborů
-    df.to_csv(RESULTS_DIR / "detailed_results.csv", index=False)
-    print(f"Detailní výsledky uloženy do {RESULTS_DIR / 'detailed_results.csv'}")
-    
-    overall_df.to_csv(RESULTS_DIR / "overall_results.csv", index=False)
-    print(f"Celkové výsledky uloženy do {RESULTS_DIR / 'overall_results.csv'}")
-    
-    # Výpis celkových výsledků
-    print("\nCelkové výsledky:")
-    for _, row in overall_df.iterrows():
-        total_similarity = row['Base_Overall'] + row['Semantic_Improvement']
-        improvement_percent = (row['Semantic_Improvement'] / row['Base_Overall'] * 100) if row['Base_Overall'] > 0 else 0
-        print(f"Model {row['Model']}: {total_similarity:.4f} (základní: {row['Base_Overall']:.4f}, zlepšení: +{row['Semantic_Improvement']:.4f}, {improvement_percent:.2f}%)")
+    filepath = RESULTS_DIR / "overall_results.png"
+    try:
+        plt.savefig(filepath)
+        print(f"Graf celkových výsledků uložen do {filepath}")
+    except Exception as e:
+        print(f"Chyba při ukládání grafu {filepath}: {e}")
+    plt.close()
+
+    # --- Generování Box plotů ---
+    plot_comparison_boxplot(detailed_scores_df)
+    plot_overall_boxplot(detailed_scores_df)
+
+    # Uložení nových souhrnných tabulek
+    try:
+        summary_stats_path = RESULTS_DIR / "summary_results.csv"
+        # Přidáme sloupec s průměrnou dobou trvání i sem?
+        # Možná lepší nechat summary_stats jen pro podobnost a overall pro vše
+        summary_stats.to_csv(summary_stats_path, index=False, float_format='%.4f')
+        print(f"Souhrnné statistiky (průměr, std dev) uloženy do {summary_stats_path}")
+
+        overall_summary_path = RESULTS_DIR / "overall_summary_results.csv"
+        # Zajistíme správné pořadí sloupců pro lepší čitelnost
+        cols_order = [
+            'Model', 'Mean_Total_Overall', 'Std_Total_Overall',
+            'Mean_Duration', 'Std_Duration', 'Mean_Base_Overall',
+            'Std_Base_Overall', 'Mean_Improvement'
+        ]
+        # Zahrnout pouze sloupce, které skutečně existují v DataFrame
+        final_cols_order = [col for col in cols_order if col in overall_summary.columns]
+        overall_summary[final_cols_order].to_csv(overall_summary_path, index=False, float_format='%.4f')
+        print(f"Celkové souhrnné statistiky (včetně času) uloženy do {overall_summary_path}")
+
+        detailed_scores_path = RESULTS_DIR / "detailed_scores_all.csv"
+        # Zajistíme pořadí sloupců
+        detailed_cols = [
+            'doc_id', 'model', 'field', 'similarity', 'duration', 'source'
+        ]
+        final_detailed_cols = [col for col in detailed_cols if col in detailed_scores_df.columns]
+        detailed_scores_df[final_detailed_cols].to_csv(detailed_scores_path, index=False, float_format='%.4f')
+        print(f"Detailní skóre (včetně času) pro box ploty uloženy do {detailed_scores_path}")
+
+    except Exception as e:
+        print(f"Chyba při ukládání CSV souborů: {e}")
+
+
+    # Výpis celkových výsledků (průměr ± std dev) - včetně času
+    print("\nCelkové výsledky (průměr ± std dev):")
+    # Použijeme overall_summary pro výpis, který již obsahuje NaN ošetření
+    for _, row in overall_summary.iterrows():
+        # <<< Změna: Přidat výpis času a ošetřit NaN >>>
+        similarity_str = f"{row['Mean_Total_Overall']:.4f} ± {row['Std_Total_Overall']:.4f}"
+        duration_str = f"{row['Mean_Duration']:.2f}s ± {row['Std_Duration']:.2f}s" if pd.notna(row['Mean_Duration']) else "N/A"
+        print(f"Model {row['Model']}: Podobnost={similarity_str}, Čas={duration_str} ", end="")
+        # <<< Konec změny >>>
+        if include_semantic and 'Mean_Base_Overall' in row and 'Mean_Improvement' in row and pd.notna(row['Mean_Base_Overall']):
+             # Kontrola existence sloupců pro případ chyby při agregaci
+             print(f"(základní: {row['Mean_Base_Overall']:.4f}, zlepšení: +{row['Mean_Improvement']:.4f})")
+        else:
+             print() # Jen nový řádek
 
 
 def main():
@@ -629,7 +997,6 @@ def main():
     
     # Nastavení úrovně logování
     if args.verbose:
-        import logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         print("Zapnuto podrobné logování")
     
@@ -688,4 +1055,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Přidat nastavení logování na začátek main, pokud není globální
+    log_level = logging.INFO if any('-v' in arg or '--verbose' in arg for arg in sys.argv) else logging.WARNING
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
     main() 

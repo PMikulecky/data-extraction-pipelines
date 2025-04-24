@@ -12,6 +12,7 @@ import PyPDF2  # Přidán import PyPDF2
 from tqdm import tqdm
 from pathlib import Path
 from typing import Dict, List, Any, Optional
+import time # Přidat na začátek souboru
 
 from models.config.model_config import get_config
 from models.providers.factory import ModelProviderFactory
@@ -192,27 +193,43 @@ Odpověď:"""
             pdf_path (str): Cesta k PDF souboru
             
         Returns:
-            dict: Extrahovaná metadata
+            tuple(dict, float | None): Extrahovaná metadata a doba trvání extrakce v sekundách (nebo None při chybě)
         """
-        # Extrahujeme text z PDF pomocí naší nové metody
-        full_text = self.extract_text_from_pdf(pdf_path)
-        
-        if not full_text:
-            print(f"Nepodařilo se extrahovat text z PDF souboru {pdf_path}")
-            return {}
-        
-        # Extrakce metadat
-        metadata = {}
-        for field in self.METADATA_FIELDS:
-            print(f"Extrahuji pole {field}...")
-            
-            # Extrakce hodnoty z celého textu
-            metadata[field] = self.extract_metadata_from_text_part(full_text, field)
-        
-        # Zkusíme vylepšit metadata přímými nálezy
-        enhanced_metadata = self.enhance_metadata_with_direct_matches(metadata, full_text)
-        
-        return enhanced_metadata
+        start_time = time.perf_counter() # Měření času - START
+        paper_id = os.path.splitext(os.path.basename(pdf_path))[0]
+        print(f"Zpracovávám PDF soubor {pdf_path} (Text)...")
+
+        try:
+            # Extrahujeme text z PDF pomocí naší nové metody
+            full_text = self.extract_text_from_pdf(pdf_path)
+
+            if not full_text:
+                print(f"Nepodařilo se extrahovat text z PDF souboru {pdf_path}")
+                duration = time.perf_counter() - start_time # Měření času - END (i při chybě)
+                return {}, duration # Vrátit délku trvání i při chybě
+
+            # Extrakce metadat
+            metadata = {}
+            for field in self.METADATA_FIELDS:
+                print(f"Extrahuji pole {field}...")
+                try:
+                    # Extrakce hodnoty z celého textu
+                    metadata[field] = self.extract_metadata_from_text_part(full_text, field)
+                except Exception as e:
+                    print(f"Chyba při extrakci pole {field} pro {pdf_path}: {e}")
+                    metadata[field] = "" # Nebo jiná chybová hodnota
+
+            # Zkusíme vylepšit metadata přímými nálezy
+            enhanced_metadata = self.enhance_metadata_with_direct_matches(metadata, full_text)
+
+            duration = time.perf_counter() - start_time # Měření času - END
+            print(f"Extrakce pro {paper_id} (Text) trvala {duration:.2f} sekund.")
+            return enhanced_metadata, duration
+        except Exception as e:
+             # Zachycení obecné chyby během zpracování
+             print(f"Obecná chyba při zpracování PDF {pdf_path} v extract_metadata (Text): {e}")
+             duration = time.perf_counter() - start_time
+             return {}, duration # Vrátit délku trvání i při chybě
     
     def extract_metadata_batch(self, pdf_paths, output_file=None):
         """
@@ -220,30 +237,38 @@ Odpověď:"""
         
         Args:
             pdf_paths (list): Seznam cest k PDF souborům
-            output_file (str, optional): Cesta k výstupnímu souboru
+            output_file (str, optional): Cesta k výstupnímu souboru pro průběžné ukládání
             
         Returns:
-            dict: Extrahovaná metadata pro každý soubor
+            tuple(dict, dict): Slovník s extrahovanými metadaty a slovník s časy extrakce
         """
         results = {}
-        
-        for pdf_path in tqdm(pdf_paths, desc="Extrakce metadat"):
+        extraction_times = {} # Nový slovník pro časy
+
+        for pdf_path in tqdm(pdf_paths, desc="Extrakce metadat (Text)"):
             paper_id = os.path.splitext(os.path.basename(pdf_path))[0]
-            print(f"\nZpracovávám PDF soubor {pdf_path} (ID: {paper_id})...")
-            
+            # print(f"\nZpracovávám PDF soubor {pdf_path} (ID: {paper_id})...") # Odstraněno, tqdm stačí
+
             try:
-                metadata = self.extract_metadata(pdf_path)
+                 # Volání upravené metody extract_metadata
+                metadata, duration = self.extract_metadata(pdf_path)
                 results[paper_id] = metadata
-                
-                # Průběžné ukládání výsledků
+                # Uložení času (i pokud je None nebo při chybě)
+                extraction_times[paper_id] = duration
+
+                # Průběžné ukládání výsledků (pouze metadata)
                 if output_file:
+                    # Ošetření None hodnot před uložením do JSON
+                    save_data = {k: (v if v is not None else {"error": "Extraction failed"}) for k, v in results.items()}
                     with open(output_file, 'w', encoding='utf-8') as f:
-                        json.dump(results, f, ensure_ascii=False, indent=2)
+                        json.dump(save_data, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                print(f"Chyba při zpracování PDF souboru {pdf_path}: {e}")
+                 # Tato chyba by neměla nastat, pokud extract_metadata správně vrací duration
+                print(f"Neočekávaná chyba při zpracování PDF souboru {pdf_path} v extract_metadata_batch (Text): {e}")
                 results[paper_id] = {"error": str(e)}
-        
-        return results
+                extraction_times[paper_id] = None # Explicitně None pro neočekávanou chybu
+
+        return results, extraction_times
     
     def extract_direct_matches(self, text):
         """
@@ -302,43 +327,56 @@ Odpověď:"""
 
 def extract_metadata_from_pdfs(pdf_dir, output_file=None, limit=None, force_extraction=False, provider_name=None, model_name=None, api_key=None):
     """
-    Extrahuje metadata z PDF souborů pomocí textové pipeline.
-    
-    Args:
-        pdf_dir (str): Cesta k adresáři s PDF soubory
-        output_file (str, optional): Cesta k výstupnímu souboru
-        limit (int, optional): Omezení počtu zpracovaných souborů
-        force_extraction (bool): Vynutí novou extrakci i když výsledky již existují
-        provider_name (str, optional): Název poskytovatele API
-        model_name (str, optional): Název modelu
-        api_key (str, optional): API klíč pro přístup k modelu
-        
-    Returns:
-        dict: Extrahovaná metadata pro každý soubor
+    Hlavní funkce pro spuštění textové pipeline pro extrakci metadat.
     """
-    # Vždy vytváříme nové výsledky bez ohledu na existenci souborů
-    print(f"Provádím novou extrakci metadat...")
-    
+    # Zkontroluje, zda výsledky už existují
+    if output_file and os.path.exists(output_file) and not force_extraction:
+        print(f"Výsledky již existují v {output_file}. Přeskakuji extrakci.")
+        try:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                results = json.load(f)
+        except json.JSONDecodeError:
+             print(f"VAROVÁNÍ: Soubor {output_file} je poškozený. Vynucuji novou extrakci.")
+             results = None
+             force_extraction = True # Vynutit novou extrakci
+
+        if not force_extraction:
+            # Pokusíme se načíst i časy (pokud existují)
+            timing_output_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_timing.json"
+            if timing_output_file.exists():
+                print(f"Načítám existující časy z {timing_output_file}")
+            return results # Vrátí pouze metadata
+
     # Získání seznamu PDF souborů
-    pdf_files = [f for f in os.listdir(pdf_dir) if f.endswith('.pdf')]
-    
-    # Omezení počtu souborů
-    if limit is not None and limit > 0:
+    pdf_files = [os.path.join(pdf_dir, f) for f in os.listdir(pdf_dir) if f.endswith('.pdf')]
+    if limit:
         pdf_files = pdf_files[:limit]
-    
-    print(f"Počet PDF souborů ke zpracování: {len(pdf_files)}")
-    
+
+    if not pdf_files:
+        print("Nebyly nalezeny žádné PDF soubory pro zpracování.")
+        return {}
+
     # Inicializace pipeline
-    pipeline = TextPipeline(
-        model_name=model_name,
-        provider_name=provider_name,
-        api_key=api_key
-    )
-    
-    # Cesty k PDF souborům
-    pdf_paths = [os.path.join(pdf_dir, f) for f in pdf_files]
-    
+    pipeline = TextPipeline(provider_name=provider_name, model_name=model_name, api_key=api_key)
+
     # Extrakce metadat
-    results = pipeline.extract_metadata_batch(pdf_paths, output_file)
-    
-    return results 
+    results, timings = pipeline.extract_metadata_batch(pdf_files, output_file) # Získání metadat i časů
+
+    # Uložení výsledků (metadata)
+    if output_file:
+        # Ošetření None hodnot před uložením do JSON
+        save_results = {k: (v if v is not None else {"error": "Extraction failed"}) for k, v in results.items()}
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(save_results, f, ensure_ascii=False, indent=2)
+        print(f"Výsledky extrakce (metadata) uloženy do {output_file}")
+
+    # Uložení časů do samostatného souboru
+    if output_file: # Uložíme časy jen pokud ukládáme i výsledky
+        # Ošetření None hodnot pro časy
+        save_timings = {k: (v if v is not None else -1.0) for k, v in timings.items()} # -1 jako indikátor chyby
+        timing_output_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_timing.json"
+        with open(timing_output_file, 'w', encoding='utf-8') as f:
+            json.dump(save_timings, f, ensure_ascii=False, indent=2)
+        print(f"Výsledky extrakce (časy) uloženy do {timing_output_file}")
+
+    return results # Vrátí pouze metadata 

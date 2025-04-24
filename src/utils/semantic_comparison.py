@@ -780,6 +780,8 @@ def semantic_compare_and_update(comparison_data):
                     if llm_match:
                         authors_llm_count += 1
                         print(f"Dokument {doc_id}: LLM identifikoval shodné autory.")
+                        print(f"  Extrahováno: '{extracted}'")
+                        print(f"  Referenční: '{reference}'")
                 except Exception as e:
                     print(f"Chyba při porovnávání autorů pomocí LLM: {e}")
             
@@ -810,6 +812,9 @@ def semantic_compare_and_update(comparison_data):
                 doc_data["doi"]["semantically_identical"] = True
                 doi_update_count += 1
                 total_updates += 1
+                print(f"Dokument {doc_id}: Sémanticky upraveno DOI (skóre: {orig_similarity:.2f} -> {new_similarity:.2f}).")
+                print(f"  Extrahováno: '{extracted}'")
+                print(f"  Referenční: '{reference}'")
         
         # Porovnání a aktualizace časopisu
         if "journal" in doc_data:
@@ -823,6 +828,9 @@ def semantic_compare_and_update(comparison_data):
                 doc_data["journal"]["semantically_identical"] = True
                 journal_update_count += 1
                 total_updates += 1
+                print(f"Dokument {doc_id}: Sémanticky upraven Journal (skóre: {orig_similarity:.2f} -> {new_similarity:.2f}).")
+                print(f"  Extrahováno: '{extracted}'")
+                print(f"  Referenční: '{reference}'")
         
         # Porovnání a aktualizace vydavatele
         if "publisher" in doc_data:
@@ -836,6 +844,9 @@ def semantic_compare_and_update(comparison_data):
                 doc_data["publisher"]["semantically_identical"] = True
                 publisher_update_count += 1
                 total_updates += 1
+                print(f"Dokument {doc_id}: Sémanticky upraven Publisher (skóre: {orig_similarity:.2f} -> {new_similarity:.2f}).")
+                print(f"  Extrahováno: '{extracted}'")
+                print(f"  Referenční: '{reference}'")
         
         # Porovnání a aktualizace klíčových slov
         if "keywords" in doc_data:
@@ -848,6 +859,7 @@ def semantic_compare_and_update(comparison_data):
                 doc_data["keywords"]["similarity"] = new_similarity
                 doc_data["keywords"]["semantically_identical"] = True
                 total_updates += 1
+                print(f"Dokument {doc_id}: Sémanticky upravena Keywords (skóre: {orig_similarity:.2f} -> {new_similarity:.2f}).")
         
         # Nové porovnání pro reference
         if "references" in doc_data:
@@ -864,7 +876,18 @@ def semantic_compare_and_update(comparison_data):
                 doc_data["references"]["semantically_improved"] = True
                 references_update_count += 1
                 total_updates += 1
-                print(f"Dokument {doc_id}: Sémanticky vylepšené reference.")
+                print(f"Dokument {doc_id}: Sémanticky vylepšené reference (skóre: {orig_similarity:.2f} -> {new_similarity:.2f}).")
+        
+        # Přepočet overall_similarity pro dokument na základě aktualizovaných hodnot polí
+        current_similarities = [
+            field_data['similarity'] 
+            for field, field_data in doc_data.items() 
+            if isinstance(field_data, dict) and 'similarity' in field_data
+        ]
+        if current_similarities:
+            doc_data['overall_similarity'] = np.mean(current_similarities)
+        else:
+            doc_data['overall_similarity'] = 0.0
     
     # Aktualizace metrik
     update_overall_metrics(comparison_data)

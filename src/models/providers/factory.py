@@ -12,6 +12,7 @@ from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingMod
 from .openai_provider import OpenAITextModelProvider, OpenAIVisionModelProvider, OpenAIEmbeddingModelProvider
 from .anthropic_provider import AnthropicTextModelProvider, AnthropicVisionModelProvider
 from .ollama_provider import OllamaTextModelProvider, OllamaEmbeddingModelProvider, OllamaVisionModelProvider
+from .gemini_provider import GeminiTextModelProvider, GeminiVisionModelProvider, GeminiEmbeddingModelProvider
 
 
 class ModelProviderFactory:
@@ -23,20 +24,23 @@ class ModelProviderFactory:
     TEXT_PROVIDERS = {
         "openai": OpenAITextModelProvider,
         "anthropic": AnthropicTextModelProvider,
-        "ollama": OllamaTextModelProvider
+        "ollama": OllamaTextModelProvider,
+        "gemini": GeminiTextModelProvider
     }
     
     # Mapování názvů poskytovatelů na implementace VisionModelProvider
     VISION_PROVIDERS = {
         "openai": OpenAIVisionModelProvider,
         "anthropic": AnthropicVisionModelProvider,
-        "ollama": OllamaVisionModelProvider
+        "ollama": OllamaVisionModelProvider,
+        "gemini": GeminiVisionModelProvider
     }
     
     # Mapování názvů poskytovatelů na implementace EmbeddingModelProvider
     EMBEDDING_PROVIDERS = {
         "openai": OpenAIEmbeddingModelProvider,
-        "ollama": OllamaEmbeddingModelProvider
+        "ollama": OllamaEmbeddingModelProvider,
+        "gemini": GeminiEmbeddingModelProvider
     }
     
     @classmethod
@@ -45,7 +49,7 @@ class ModelProviderFactory:
         Vytvoří instanci TextModelProvider.
         
         Args:
-            provider_name: Název poskytovatele (např. "openai", "anthropic", "ollama")
+            provider_name: Název poskytovatele (např. "openai", "anthropic", "ollama", "gemini")
             model_name: Název modelu
             api_key: API klíč
             **kwargs: Další parametry pro inicializaci poskytovatele
@@ -79,7 +83,7 @@ class ModelProviderFactory:
         Vytvoří instanci VisionModelProvider.
         
         Args:
-            provider_name: Název poskytovatele (např. "openai", "anthropic", "ollama")
+            provider_name: Název poskytovatele (např. "openai", "anthropic", "ollama", "gemini")
             model_name: Název modelu
             api_key: API klíč
             **kwargs: Další parametry pro inicializaci poskytovatele
@@ -113,7 +117,7 @@ class ModelProviderFactory:
         Vytvoří instanci EmbeddingModelProvider.
         
         Args:
-            provider_name: Název poskytovatele (např. "openai", "ollama")
+            provider_name: Název poskytovatele (např. "openai", "ollama", "gemini")
             model_name: Název modelu
             api_key: API klíč
             **kwargs: Další parametry pro inicializaci poskytovatele

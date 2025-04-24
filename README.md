@@ -228,19 +228,23 @@ metadata-extraction-ai/
 
 ## Výstupy
 
-Aplikace generuje následující výstupy:
+Aplikace generuje následující výstupy v adresáři `results/`:
 
 1. **JSON soubory s výsledky**:
-   - `embedded_results.json`, `vlm_results.json`: Extrahovaná metadata
-   - `embedded_comparison.json`, `vlm_comparison.json`: Výsledky porovnání s referencemi
-   - `embedded_comparison_semantic.json`, `vlm_comparison_semantic.json`: Výsledky po sémantickém porovnání
-   - `semantic_comparison_results.json`: Souhrnné výsledky sémantického porovnání
+   - `[model]_results.json`: Extrahovaná metadata pro daný model (např. `embedded_results.json`).
+   - `[model]_comparison.json`: Výsledky porovnání s referencemi pro daný model.
+   - `[model]_comparison_semantic.json`: Výsledky po sémantickém porovnání (pokud bylo spuštěno).
+   - `semantic_comparison_results.json`: Souhrnné výsledky sémantického porovnání (pokud bylo spuštěno samostatně).
 
 2. **Vizualizace**:
-   - `comparison_results.png`: Graf porovnání úspěšnosti modelů pro jednotlivá pole metadat
-   - `overall_results.png`: Graf celkové úspěšnosti modelů
+   - `comparison_results.png`: Sloupcový graf porovnání úspěšnosti modelů pro jednotlivá pole metadat. **Nově obsahuje chybové úsečky (±1σ)**.
+   - `overall_results.png`: Sloupcový graf celkové úspěšnosti modelů. **Nově obsahuje chybové úsečky (±1σ)**.
+   - **`comparison_results_boxplot.png`**: **Nový box plot** zobrazující distribuci skóre podobnosti pro jednotlivá pole a modely.
+   - **`overall_results_boxplot.png`**: **Nový box plot** zobrazující distribuci celkového skóre podobnosti pro jednotlivé modely.
 
 3. **CSV tabulky**:
-   - `overall_results.csv`: Tabulka s celkovými výsledky
-   - `detailed_results.csv`: Detailní výsledky pro každý dokument a pole
-   - `summary_results.csv`: Souhrnné statistiky pro každé pole 
+   - `summary_results.csv`: Souhrnné statistiky (průměr, směrodatná odchylka) pro každé pole a model.
+   - `overall_summary_results.csv`: Celkové souhrnné statistiky (průměr, směrodatná odchylka) pro každý model.
+   - `detailed_scores_all.csv`: Detailní skóre podobnosti pro každý dokument, pole a model, použité pro generování box plotů a výpočet statistik.
+   - `detailed_results.csv`: *Původní* detailní výsledky (může mít jinou strukturu).
+   - `overall_results.csv`: *Původní* celkové výsledky (může mít jinou strukturu). 

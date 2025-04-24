@@ -164,9 +164,9 @@ def prepare_result_directory(config_name: str) -> str:
     return str(result_dir)
 
 
-def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str]) -> None:
+def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str]) -> str | None:
     """
-    Spustí extrakci metadat s danou konfigurací.
+    Spustí extrakci metadat s danou konfigurací a vrátí cestu k adresáři s výsledky.
     
     Args:
         config (Dict[str, Any]): Konfigurace modelu
@@ -226,9 +226,13 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
             "text_comparison_semantic.json",  # Přidáno sémantické porovnání textové pipeline
             "comparison_results.png",
             "overall_results.png",
+            "comparison_results_boxplot.png", # Přidán box plot porovnání polí
+            "overall_results_boxplot.png",  # Přidán celkový box plot
             "overall_results.csv",
-            "detailed_results.csv",
-            "summary_results.csv"
+            "detailed_results.csv", # Pozn.: Může být nahrazeno novými CSV
+            "summary_results.csv", # Nový souhrn s průměry a std dev
+            "overall_summary_results.csv", # Nový celkový souhrn
+            "detailed_scores_all.csv" # Nová detailní data pro box ploty
         ]
         
         # Kopírujeme všechny výsledky, které existují
@@ -243,8 +247,11 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
         processed_models[f"{config['vision']['provider']}_{config['vision']['model']}"] = result_dir
         processed_models[f"{config['embedding']['provider']}_{config['embedding']['model']}"] = result_dir
             
+        return result_dir
+            
     except subprocess.CalledProcessError as e:
         print(f"Chyba při spuštění extrakce: {e}")
+        return None
     except KeyboardInterrupt:
         print("\nExtrakce přerušena uživatelem.")
         sys.exit(1)
@@ -324,197 +331,231 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
     summary_dir = RESULTS_DIR / "final_comparison"
     summary_dir.mkdir(exist_ok=True)
     
-    # Načtení dat ze všech běhů
-    all_results = {}
-    print(f"Prohledávám {len(result_dirs)} adresářů s výsledky...")
-    
-    for result_dir in result_dirs:
-        # Načtení konfigurace
-        config_path = Path(result_dir) / "used_config.json"
-        if not config_path.exists():
-            print(f"  Přeskakuji adresář {result_dir} - chybí konfigurační soubor")
-            continue
-            
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                
-            # Načtení výsledků - kontrolujeme více možných míst
-            comparison_files = [
-                Path(result_dir) / "semantic_comparison_results.json",
-                Path(result_dir) / "embedded_comparison_semantic.json",
-                Path(result_dir) / "vlm_comparison_semantic.json",
-                Path(result_dir) / "text_comparison_semantic.json",  # Přidáno textové sémantické porovnání
-                Path(result_dir) / "embedded_comparison.json",
-                Path(result_dir) / "vlm_comparison.json",
-                Path(result_dir) / "text_comparison.json"  # Přidáno textové porovnání
-            ]
-            
-            found_results = False
-            for comparison_path in comparison_files:
-                if comparison_path.exists():
-                    print(f"  Načítám výsledky z {comparison_path}")
-                    with open(comparison_path, 'r', encoding='utf-8') as f:
-                        results = json.load(f)
-                    
-                    # Identifikace modelu z názvu adresáře a názvu souboru
-                    dir_name = Path(result_dir).name
-                    file_name = comparison_path.name
-                    
-                    # Zjištění názvu modelu
-                    if "vlm" in file_name.lower():
-                        model_prefix = "VLM"
-                    elif "embedded" in file_name.lower():
-                        model_prefix = "EMBEDDED"
-                    elif "text" in file_name.lower():
-                        model_prefix = "TEXT"
-                    else:
-                        # Pokud nejde identifikovat z názvu souboru, použijeme název adresáře
-                        model_prefix = dir_name.split('_')[0].upper()
-                    
-                    # Kompletní název modelu - kombinace názvu adresáře a typu modelu
-                    model_name = f"{model_prefix}-{dir_name.split('_')[0]}"
-                    
-                    # Ověříme strukturu dat
-                    if 'metrics' in results:
-                        all_results[model_name] = results
-                        found_results = True
-                        print(f"  Úspěšně načten model: {model_name}")
-                    else:
-                        print(f"  Neplatná struktura dat v souboru {comparison_path}")
-            
-            if not found_results:
-                print(f"  V adresáři {result_dir} nebyly nalezeny žádné validní výsledky")
+    # Načtení dat ze všech běhů - ZMĚNA: Budeme načítat z CSV souborů
+    all_summary_dfs = []
+    all_overall_dfs = []
+    model_names = []
+
+    print(f"Prohledávám {len(result_dirs)} adresářů s výsledky pro summary a overall CSV...")
+
+    for result_dir_path_str in result_dirs:
+        result_dir = Path(result_dir_path_str)
         
-        except Exception as e:
-            print(f"  Chyba při zpracování adresáře {result_dir}: {e}")
+        # Získání jména modelu z názvu adresáře nebo konfigurace
+        # Jednoduchý přístup: použít název adresáře
+        model_name = result_dir.name 
+        # Lze vylepšit načtením z used_config.json, pokud je potřeba specifičtější název
+
+        summary_csv_path = result_dir / "summary_results.csv"
+        overall_csv_path = result_dir / "overall_summary_results.csv"
+
+        found_summary = False
+        if summary_csv_path.exists():
+            try:
+                df_summary = pd.read_csv(summary_csv_path)
+                # Přidáme sloupec s názvem modelu
+                df_summary['Model'] = model_name 
+                all_summary_dfs.append(df_summary)
+                found_summary = True
+                print(f"  Načten soubor: {summary_csv_path}")
+            except Exception as e:
+                print(f"  Chyba při načítání {summary_csv_path}: {e}")
+        else:
+            print(f"  Soubor nenalezen: {summary_csv_path}")
+
+        found_overall = False
+        if overall_csv_path.exists():
+            try:
+                df_overall = pd.read_csv(overall_csv_path)
+                 # Přidáme sloupec s názvem modelu
+                df_overall['Model'] = model_name
+                all_overall_dfs.append(df_overall)
+                found_overall = True
+                print(f"  Načten soubor: {overall_csv_path}")
+            except Exception as e:
+                print(f"  Chyba při načítání {overall_csv_path}: {e}")
+        else:
+             print(f"  Soubor nenalezen: {overall_csv_path}")
+
+        if found_summary or found_overall:
+             if model_name not in model_names: # Přidat jen unikátní jména
+                model_names.append(model_name)
+
+
+    if not all_summary_dfs and not all_overall_dfs:
+        print("Nenalezeny žádné výsledky (summary_results.csv nebo overall_summary_results.csv) pro porovnání.")
+        return
+
+    # Spojení DataFrames
+    final_summary_df = pd.concat(all_summary_dfs, ignore_index=True) if all_summary_dfs else pd.DataFrame()
+    final_overall_df = pd.concat(all_overall_dfs, ignore_index=True) if all_overall_dfs else pd.DataFrame()
     
-    if not all_results:
-        print("Nenalezeny žádné výsledky pro porovnání.")
+    if final_summary_df.empty and final_overall_df.empty:
+        print("Nebylo možné spojit žádná data z CSV souborů.")
         return
         
-    print(f"Nalezeno {len(all_results)} modelů pro porovnání.")
+    print(f"Nalezeno {len(model_names)} unikátních modelů/konfigurací pro porovnání.")
     
-    # Vytvoření DataFrame pro každý typ metadat
-    metadata_fields = ['title', 'authors', 'abstract', 'keywords', 'doi', 'year', 
-                      'journal', 'volume', 'issue', 'pages', 'publisher', 'references']
-    
-    # Příprava dat pro tabulky
-    field_results = {field: [] for field in metadata_fields}
-    overall_results = []
-    
-    for model_name, results in all_results.items():
-        # Pro každé pole metadat
-        for field in metadata_fields:
-            if field in results.get('metrics', {}):
-                field_results[field].append({
-                    'Model': model_name,
-                    'Úspěšnost': results['metrics'][field]['mean'],
-                    'Medián': results['metrics'][field]['median'],
-                    'Min': results['metrics'][field]['min'],
-                    'Max': results['metrics'][field]['max'],
-                    'Počet': results['metrics'][field]['count']
-                })
-        
-        # Celkové výsledky
-        if 'metrics' in results and 'overall' in results['metrics']:
-            overall_results.append({
-                'Model': model_name,
-                'Celková úspěšnost': results['metrics']['overall']['mean'],
-                'Medián': results['metrics']['overall']['median'],
-                'Min': results['metrics']['overall']['min'],
-                'Max': results['metrics']['overall']['max'],
-                'Počet': results['metrics']['overall']['count']
-            })
-    
+    # Ujistíme se, že máme potřebné sloupce (názvy podle src/main.py::visualize_results)
+    required_summary_cols = ['Field', 'Model', 'Mean_Total', 'Std_Total']
+    required_overall_cols = ['Model', 'Mean_Total_Overall', 'Std_Total_Overall']
+
+    # Kontrola sloupců
+    if not final_summary_df.empty and not all(col in final_summary_df.columns for col in required_summary_cols):
+         print(f"Varování: Chybí některé požadované sloupce v summary_results.csv ({required_summary_cols}). Grafy polí nemusí být kompletní.")
+         # Můžeme zkusit pokračovat s dostupnými sloupci, nebo zde skončit
+         # Prozatím budeme pokračovat a matplotlib/pandas si poradí s chybějícími daty (NaN)
+
+    if not final_overall_df.empty and not all(col in final_overall_df.columns for col in required_overall_cols):
+         print(f"Varování: Chybí některé požadované sloupce v overall_summary_results.csv ({required_overall_cols}). Celkový graf nemusí být vytvořen.")
+         # Prozatím budeme pokračovat
+
+
     # Počítadlo vytvořených souborů
     created_files = []
-    
-    # Uložení tabulek pro jednotlivá pole
-    for field, data in field_results.items():
-        if data:
-            df = pd.DataFrame(data)
-            output_file = summary_dir / f"{field}_comparison.csv"
-            df.to_csv(output_file, index=False)
-            created_files.append(output_file.name)
+
+    # --- Vytvoření grafů pro jednotlivá pole ---
+    if not final_summary_df.empty and all(col in final_summary_df.columns for col in required_summary_cols):
+        metadata_fields = final_summary_df['Field'].unique()
+        
+        for field in metadata_fields:
+            df_field = final_summary_df[final_summary_df['Field'] == field].sort_values(by='Model')
             
-            # Vytvoření grafu pro pole
-            plt.figure(figsize=(10, 6))
-            bars = plt.bar(df['Model'], df['Úspěšnost'])
+            if df_field.empty:
+                continue
+
+            plt.figure(figsize=(max(10, len(df_field['Model'])*0.8), 6)) # Dynamická šířka
             
-            # Přidání hodnot nad sloupce
-            for bar in bars:
-                height = bar.get_height()
-                plt.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{height:.2%}',
-                        ha='center', va='bottom')
+            means = df_field['Mean_Total']
+            errors = df_field['Std_Total'].fillna(0) # Nahradit NaN nulou pro errorbar
+            models = df_field['Model']
             
-            plt.title(f'Porovnání úspěšnosti modelů - {field}')
-            plt.xlabel('Model')
-            plt.ylabel('Úspěšnost')
-            plt.ylim(0, 1.05)
-            plt.xticks(rotation=45)
+            x_pos = np.arange(len(models))
+            
+            bars = plt.bar(x_pos, means, color='skyblue') 
+            # Přidání chybových úseček
+            plt.errorbar(x_pos, means, yerr=errors, fmt='none', ecolor='black', capsize=5)
+
+            # Přidání hodnot nad sloupce (volitelné, může být nepřehledné s error bary)
+            # for i, bar in enumerate(bars):
+            #     height = bar.get_height()
+            #     plt.text(bar.get_x() + bar.get_width()/2., height + errors.iloc[i] * 1.1 , # Pozice nad error bar
+            #             f'{height:.3f}', # Zobrazit s desetinnými místy
+            #             ha='center', va='bottom', fontsize=9)
+
+            plt.title(f'Porovnání úspěšnosti modelů - {field} (průměr ±1σ)')
+            plt.xlabel('Model / Konfigurace')
+            plt.ylabel('Průměrná podobnost')
+            plt.xticks(x_pos, models, rotation=45, ha="right") # Použít názvy modelů jako popisky osy x
+            plt.ylim(0, max(1.05, (means + errors).max() * 1.1)) # Dynamický horní limit Y osy
             plt.tight_layout()
+            
             output_file = summary_dir / f"{field}_comparison.png"
+            try:
+                plt.savefig(output_file)
+                created_files.append(output_file.name)
+            except Exception as e:
+                print(f"Chyba při ukládání grafu {output_file.name}: {e}")
+            plt.close()
+            
+            # Uložení CSV pro dané pole (volitelné, lze nahradit jedním souhrnným CSV)
+            output_csv = summary_dir / f"{field}_comparison.csv"
+            try:
+                # Ukládáme jen relevantní sloupce
+                df_field[['Model', 'Mean_Total', 'Std_Total']].to_csv(output_csv, index=False, float_format='%.4f')
+                created_files.append(output_csv.name)
+            except Exception as e:
+                 print(f"Chyba při ukládání CSV {output_csv.name}: {e}")
+
+    else:
+        print("Přeskakuji generování grafů a CSV pro jednotlivá pole - chybí data nebo sloupce v summary_results.")
+
+
+    # --- Vytvoření grafu celkových výsledků ---
+    if not final_overall_df.empty and all(col in final_overall_df.columns for col in required_overall_cols):
+        
+        df_overall_sorted = final_overall_df.sort_values(by='Model')
+        
+        means_overall = df_overall_sorted['Mean_Total_Overall']
+        errors_overall = df_overall_sorted['Std_Total_Overall'].fillna(0)
+        models_overall = df_overall_sorted['Model']
+        
+        x_pos_overall = np.arange(len(models_overall))
+
+        plt.figure(figsize=(max(10, len(models_overall)*0.8), 6)) # Dynamická šířka
+        bars_overall = plt.bar(x_pos_overall, means_overall, color='lightcoral')
+        # Přidání chybových úseček
+        plt.errorbar(x_pos_overall, means_overall, yerr=errors_overall, fmt='none', ecolor='black', capsize=5)
+
+        # Přidání hodnot nad sloupce (volitelné)
+        # for i, bar in enumerate(bars_overall):
+        #     height = bar.get_height()
+        #     plt.text(bar.get_x() + bar.get_width()/2., height + errors_overall.iloc[i] * 1.1,
+        #             f'{height:.3f}',
+        #             ha='center', va='bottom', fontsize=9)
+
+        plt.title('Celková úspěšnost modelů / konfigurací (průměr ±1σ)')
+        plt.xlabel('Model / Konfigurace')
+        plt.ylabel('Průměrná celková podobnost')
+        plt.xticks(x_pos_overall, models_overall, rotation=45, ha="right")
+        plt.ylim(0, max(1.05, (means_overall + errors_overall).max() * 1.1))
+        plt.tight_layout()
+        
+        output_file = summary_dir / "overall_comparison.png"
+        try:
             plt.savefig(output_file)
             created_files.append(output_file.name)
-            plt.close()
-    
-    # Uložení celkových výsledků
-    df_overall = None
-    if overall_results:
-        df_overall = pd.DataFrame(overall_results)
-        output_file = summary_dir / "overall_comparison.csv"
-        df_overall.to_csv(output_file, index=False)
-        created_files.append(output_file.name)
-        
-        # Vytvoření grafu celkových výsledků
-        plt.figure(figsize=(10, 6))
-        bars = plt.bar(df_overall['Model'], df_overall['Celková úspěšnost'])
-        
-        # Přidání hodnot nad sloupce
-        for bar in bars:
-            height = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{height:.2%}',
-                    ha='center', va='bottom')
-        
-        plt.title('Celková úspěšnost modelů')
-        plt.xlabel('Model')
-        plt.ylabel('Úspěšnost')
-        plt.ylim(0, 1.05)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        output_file = summary_dir / "overall_comparison.png"
-        plt.savefig(output_file)
-        created_files.append(output_file.name)
+        except Exception as e:
+            print(f"Chyba při ukládání grafu {output_file.name}: {e}")
         plt.close()
+
+        # Uložení celkového CSV (volitelné, lze nahradit jedním souhrnným)
+        output_csv_overall = summary_dir / "overall_comparison.csv"
+        try:
+            # Ukládáme jen relevantní sloupce
+            df_overall_sorted[['Model', 'Mean_Total_Overall', 'Std_Total_Overall']].to_csv(output_csv_overall, index=False, float_format='%.4f')
+            created_files.append(output_csv_overall.name)
+        except Exception as e:
+             print(f"Chyba při ukládání CSV {output_csv_overall.name}: {e}")
+             
+        # Uložení spojených finálních dat (volitelné, ale užitečné)
+        try:
+            final_summary_df.to_csv(summary_dir / "final_summary_all_fields.csv", index=False, float_format='%.4f')
+            final_overall_df.to_csv(summary_dir / "final_overall_all_models.csv", index=False, float_format='%.4f')
+            created_files.append("final_summary_all_fields.csv")
+            created_files.append("final_overall_all_models.csv")
+        except Exception as e:
+            print(f"Chyba při ukládání finálních spojených CSV: {e}")
+
+    else:
+         print("Přeskakuji generování celkového grafu a CSV - chybí data nebo sloupce v overall_summary_results.")
+
+
+    # Závěrečný výpis
+    unique_created_files = sorted(list(set(created_files))) # Odstranění duplicit a seřazení
     
     if is_final:
         print(f"\nFinální souhrnné výsledky byly uloženy do adresáře: {summary_dir}")
-        print(f"Vytvořeno {len(created_files)} souborů.")
-        print("\nVytvořené soubory:")
-        print("1. CSV soubory s detailními výsledky:")
-        for field in metadata_fields:
-            if f"{field}_comparison.csv" in created_files:
-                print(f"   - {field}_comparison.csv")
-        if "overall_comparison.csv" in created_files:
-            print("   - overall_comparison.csv")
-        print("\n2. Grafy porovnání:")
-        for field in metadata_fields:
-            if f"{field}_comparison.png" in created_files:
-                print(f"   - {field}_comparison.png")
-        if "overall_comparison.png" in created_files:
-            print("   - overall_comparison.png")
+        print(f"Vytvořeno/aktualizováno {len(unique_created_files)} souborů.")
+        if unique_created_files:
+             print("\nVytvořené soubory:")
+             for fname in unique_created_files:
+                 print(f"  - {fname}")
     else:
         print(f"\nPrůběžné výsledky byly aktualizovány v adresáři: {summary_dir}")
-        print(f"Vytvořeno/aktualizováno {len(created_files)} souborů.")
-        if df_overall is not None and len(all_results) > 0:
-            # Výpis aktuálního pořadí modelů
-            print("\nAktuální pořadí modelů:")
-            df_overall_sorted = df_overall.sort_values('Celková úspěšnost', ascending=False)
-            for i, (_, row) in enumerate(df_overall_sorted.iterrows(), 1):
-                print(f"{i}. {row['Model']}: {row['Celková úspěšnost']:.2%}")
+        print(f"Vytvořeno/aktualizováno {len(unique_created_files)} souborů.")
+        
+    # Výpis aktuálního pořadí modelů z finálních dat, pokud jsou dostupná
+    if not final_overall_df.empty and 'Mean_Total_Overall' in final_overall_df.columns:
+        print("\nAktuální pořadí modelů (podle průměrné celkové úspěšnosti):")
+        df_overall_sorted_final = final_overall_df.sort_values('Mean_Total_Overall', ascending=False)
+        for i, (_, row) in enumerate(df_overall_sorted_final.iterrows(), 1):
+            model_disp = row['Model']
+            mean_disp = row['Mean_Total_Overall']
+            std_disp = row['Std_Total_Overall'] if 'Std_Total_Overall' in row and pd.notna(row['Std_Total_Overall']) else 0
+            print(f"{i}. {model_disp}: {mean_disp:.4f} ± {std_disp:.4f}")
+    elif not final_overall_df.empty:
+         print("\nNebylo možné určit pořadí modelů - chybí sloupec 'Mean_Total_Overall'.")
 
 
 def main():
