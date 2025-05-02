@@ -82,7 +82,7 @@ class MetadataComparator:
         valid_similarities = [results[field]['similarity'] for field in self.METADATA_FIELDS 
                              if field in results and results[field]['similarity'] is not None]
         
-        results['overall_similarity'] = np.mean(valid_similarities) if valid_similarities else 0.0
+        results['overall_similarity'] = np.mean(valid_similarities) if valid_similarities else None
         
         return results
     
@@ -98,9 +98,9 @@ class MetadataComparator:
         Returns:
             float: Hodnota podobnosti (0.0 - 1.0)
         """
-        # Kontrola, zda jsou obě hodnoty k dispozici
-        if extracted is None or reference is None:
-            return 0.0
+        # Kontrola, zda jsou obě hodnoty k dispozici a reference není NaN
+        if extracted is None or reference is None or pd.isna(reference):
+            return None # Vracíme None, pokud nelze porovnat
         
         # Převod na řetězce
         extracted_str = str(extracted).lower()
@@ -339,11 +339,17 @@ def calculate_overall_metrics(comparison_results):
         if 'error' in results:
             continue
         
-        metrics['overall'].append(results.get('overall_similarity', 0.0))
+        # Přidáme overall_similarity pouze pokud není None
+        overall_sim = results.get('overall_similarity')
+        if overall_sim is not None:
+            metrics['overall'].append(overall_sim)
         
         for field in MetadataComparator.METADATA_FIELDS:
             if field in results and 'similarity' in results[field]:
-                metrics[field].append(results[field]['similarity'])
+                # Přidáme similarity pouze pokud není None
+                field_sim = results[field]['similarity']
+                if field_sim is not None:
+                    metrics[field].append(field_sim)
     
     # Výpočet průměrných hodnot
     averages = {}
@@ -357,11 +363,12 @@ def calculate_overall_metrics(comparison_results):
                 'count': len(values)
             }
         else:
+            # Pokud nejsou žádné validní hodnoty, nastavíme metriky na None nebo NaN
             averages[field] = {
-                'mean': 0.0,
-                'median': 0.0,
-                'min': 0.0,
-                'max': 0.0,
+                'mean': np.nan,
+                'median': np.nan,
+                'min': np.nan,
+                'max': np.nan,
                 'count': 0
             }
     

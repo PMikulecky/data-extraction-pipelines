@@ -18,18 +18,21 @@ import time
 import re  # Přidáno pro práci s regulárními výrazy
 import numpy as np # Přidáno pro výpočty
 import logging # Přidáno pro logování v pomocných funkcích
+from datetime import datetime # Přidán import
 
 # Import lokálních modulů
-from data_preparation import filter_papers_with_valid_doi_and_references as filter_papers_with_valid_doi
-from pdf_downloader import download_pdfs_for_filtered_papers
-from models.embedded_pipeline import extract_metadata_from_pdfs as extract_with_embedded
-# Dočasně zakomentováno kvůli problémům s importem
-from models.vlm_pipeline import extract_metadata_from_pdfs as extract_with_vlm
-from models.text_pipeline import extract_metadata_from_pdfs as extract_with_text
-from utils.metadata_comparator import compare_all_metadata, calculate_overall_metrics
-from utils.semantic_comparison import process_comparison_files
+from src.data_preparation import filter_papers_with_valid_doi_and_references as filter_papers_with_valid_doi
+from src.pdf_downloader import download_pdfs_for_filtered_papers
+from src.models.embedded_pipeline import extract_metadata_from_pdfs as extract_with_embedded
+from src.models.vlm_pipeline import extract_metadata_from_pdfs as extract_with_vlm
+from src.models.text_pipeline import extract_metadata_from_pdfs as extract_with_text
+from src.utils.metadata_comparator import compare_all_metadata, calculate_overall_metrics, MetadataComparator
+from src.utils.semantic_comparison import process_comparison_files
 # Import konfiguračního modulu
-from models.config.model_config import load_config, get_config
+from src.models.config.model_config import load_config, get_config
+from src.config.runtime_config import set_run_results_dir, get_run_results_dir
+# <<< Změna: Import runtime_config >>>
+# <<< Konec změny >>>
 
 # Načtení proměnných prostředí
 load_dotenv()
@@ -68,13 +71,13 @@ DATA_DIR = BASE_DIR / "data"
 INPUT_CSV = DATA_DIR / "papers.csv"
 FILTERED_CSV = DATA_DIR / "papers-filtered.csv"
 PDF_DIR = DATA_DIR / "pdfs"
-RESULTS_DIR = BASE_DIR / "results"
+# RESULTS_DIR = BASE_DIR / "results" # Odstraněno - použijeme get_run_results_dir()
 CONFIG_DIR = BASE_DIR / "config"
 MODELS_JSON = CONFIG_DIR / "models.json"
 
 # Vytvoření adresářů, pokud neexistují
 PDF_DIR.mkdir(parents=True, exist_ok=True)
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+# RESULTS_DIR.mkdir(parents=True, exist_ok=True) # Odstraněno
 
 # Načtení konfigurace
 if MODELS_JSON.exists():
@@ -144,7 +147,7 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
         force_extraction (bool): Vynutí novou extrakci metadat
         
     Returns:
-        dict: Výsledky porovnání
+        tuple: Výsledky porovnání, časy, tokeny
     """
     # Zobrazení API klíčů před spuštěním extrakce
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -201,459 +204,414 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
     
     # 4. Extrakce metadat pomocí různých modelů
     results = {}
-    
+    all_timings = {} # Slovník pro sběr časů
+    all_token_usages = {} # Nový slovník pro sběr tokenů
+
     for model in models:
+        output_file = get_run_results_dir() / f"{model}_results.json"
+        api_key = None # Resetovat pro každý model
+        provider_name = None
+        model_name_extracted = None
+        current_results = None
+        current_timings = None
+        current_token_usages = None # Inicializace pro tokeny
+
         if model == 'embedded':
             print("\n=== Extrakce metadat pomocí Embedded pipeline ===")
-            print(f"Anthropic API klíč před extrakcí, začíná: {anthropic_key[:10]}..., délka: {len(anthropic_key)} znaků")
-            output_file = RESULTS_DIR / "embedded_results.json"
-            
             try:
-                # Explicitní předání API klíče
-                from models.config.model_config import get_config
                 config = get_config()
                 text_config = config.get_text_config()
                 provider_name = text_config.get("provider")
-                model_name = text_config.get("model")
-                
-                print(f"Použití providera {provider_name} a modelu {model_name} z konfigurace")
-                
-                # Explicitní předání API klíče podle poskytovatele
-                api_key = None
-                if provider_name == "anthropic":
-                    api_key = anthropic_key
-                    print(f"Předávám explicitně Anthropic API klíč, začátek: {api_key[:10]}...")
-                elif provider_name == "openai":
-                    api_key = openai_key
-                    print(f"Předávám explicitně OpenAI API klíč, začátek: {api_key[:10]}...")
-                
-                results['embedded'] = extract_with_embedded(
-                    PDF_DIR, 
-                    output_file, 
-                    limit=limit, 
+                model_name_extracted = text_config.get("model")
+                # <<< Přidáno: Načtení konfigurace embeddingů >>>
+                embedding_config = config.get_embedding_config()
+                embedding_provider_name = embedding_config.get("provider")
+                embedding_model_name = embedding_config.get("model")
+                # <<< Konec přidání >>>
+                print(f"Použití providera {provider_name} a modelu {model_name_extracted} z konfigurace")
+
+                # <<< Změna: Určení správných API klíčů pro text a embedding >>>
+                text_api_key = None
+                if provider_name == "anthropic": text_api_key = anthropic_key
+                elif provider_name == "openai": text_api_key = openai_key
+                if text_api_key: print(f"Předávám explicitně {provider_name} API klíč pro text...")
+
+                embedding_api_key = None
+                if embedding_provider_name == "anthropic": embedding_api_key = anthropic_key
+                elif embedding_provider_name == "openai": embedding_api_key = openai_key
+                if embedding_api_key: print(f"Předávám explicitně {embedding_provider_name} API klíč pro embedding...")
+                # <<< Konec změny >>>
+
+                # <<< Změna: Zachytit results, timings a token_usages >>>
+                current_results, current_timings, current_token_usages = extract_with_embedded(
+                    pdf_dir=PDF_DIR,
+                    limit=limit,
                     force_extraction=force_extraction,
                     provider_name=provider_name,
-                    model_name=model_name,
-                    api_key=api_key
+                    model_name=model_name_extracted,
+                    text_api_key=text_api_key,
+                    embedding_api_key=embedding_api_key,
+                    embedding_provider_name=embedding_provider_name,
+                    embedding_model_name=embedding_model_name
                 )
+                # <<< Konec změny >>>
             except Exception as e:
                 import traceback
                 print(f"Chyba při extrakci metadat pomocí Embedded pipeline: {e}")
                 print(f"Podrobnosti chyby: {traceback.format_exc()}")
-                results['embedded'] = {}
-                
+                current_results = {}; current_timings = {}; current_token_usages = {}
+
         elif model == 'vlm':
             print("\n=== Extrakce metadat pomocí VLM pipeline ===")
-            print(f"Anthropic API klíč před extrakcí, začíná: {anthropic_key[:10]}..., délka: {len(anthropic_key)} znaků")
-            output_file = RESULTS_DIR / "vlm_results.json"
-            
             try:
-                # Explicitní předání API klíče
-                from models.config.model_config import get_config
                 config = get_config()
                 vision_config = config.get_vision_config()
                 provider_name = vision_config.get("provider")
-                model_name = vision_config.get("model")
-                
-                print(f"Použití providera {provider_name} a modelu {model_name} z konfigurace")
-                
-                # Explicitní předání API klíče podle poskytovatele
-                api_key = None
-                if provider_name == "anthropic":
-                    api_key = anthropic_key
-                    print(f"Předávám explicitně Anthropic API klíč, začátek: {api_key[:10]}...")
-                elif provider_name == "openai":
-                    api_key = openai_key
-                    print(f"Předávám explicitně OpenAI API klíč, začátek: {api_key[:10]}...")
-                
-                results['vlm'] = extract_with_vlm(
-                    PDF_DIR, 
-                    output_file, 
+                model_name_extracted = vision_config.get("model")
+                print(f"Použití providera {provider_name} a modelu {model_name_extracted} z konfigurace")
+
+                # <<< Změna: Určení správného API klíče pro VLM >>>
+                vision_api_key = None
+                if provider_name == "anthropic": vision_api_key = anthropic_key
+                elif provider_name == "openai": vision_api_key = openai_key
+                if vision_api_key: print(f"Předávám explicitně {provider_name} API klíč...")
+                # <<< Konec změny >>>
+
+                # <<< Změna: Zachytit results, timings a token_usages >>>
+                current_results, current_timings, current_token_usages = extract_with_vlm(
+                    pdf_dir=PDF_DIR,
                     limit=limit,
                     force_extraction=force_extraction,
                     provider_name=provider_name,
-                    model_name=model_name,
-                    api_key=api_key
+                    model_name=model_name_extracted,
+                    api_key=vision_api_key
                 )
+                # <<< Konec změny >>>
             except Exception as e:
                 import traceback
                 print(f"Chyba při extrakci metadat pomocí VLM pipeline: {e}")
                 print(f"Podrobnosti chyby: {traceback.format_exc()}")
-                results['vlm'] = {}
-        
+                current_results = {}; current_timings = {}; current_token_usages = {}
+
         elif model == 'text':
             print("\n=== Extrakce metadat pomocí textové pipeline ===")
-            print(f"Anthropic API klíč před extrakcí, začíná: {anthropic_key[:10]}..., délka: {len(anthropic_key)} znaků")
-            output_file = RESULTS_DIR / "text_results.json"
-            
             try:
-                # Explicitní předání API klíče
-                from models.config.model_config import get_config
                 config = get_config()
                 text_config = config.get_text_config()
                 provider_name = text_config.get("provider")
-                model_name = text_config.get("model")
-                
-                print(f"Použití providera {provider_name} a modelu {model_name} z konfigurace")
-                
-                # Explicitní předání API klíče podle poskytovatele
-                api_key = None
-                if provider_name == "anthropic":
-                    api_key = anthropic_key
-                    print(f"Předávám explicitně Anthropic API klíč, začátek: {api_key[:10]}...")
-                elif provider_name == "openai":
-                    api_key = openai_key
-                    print(f"Předávám explicitně OpenAI API klíč, začátek: {api_key[:10]}...")
-                
-                results['text'] = extract_with_text(
-                    PDF_DIR, 
-                    output_file, 
-                    limit=limit, 
+                model_name_extracted = text_config.get("model")
+                print(f"Použití providera {provider_name} a modelu {model_name_extracted} z konfigurace")
+
+                # <<< Změna: Určení správného API klíče pro text >>>
+                text_api_key = None
+                if provider_name == "anthropic": text_api_key = anthropic_key
+                elif provider_name == "openai": text_api_key = openai_key
+                if text_api_key: print(f"Předávám explicitně {provider_name} API klíč...")
+                # <<< Konec změny >>>
+
+                # <<< Změna: Zachytit results, timings a token_usages >>>
+                current_results, current_timings, current_token_usages = extract_with_text(
+                    pdf_dir=PDF_DIR,
+                    limit=limit,
                     force_extraction=force_extraction,
                     provider_name=provider_name,
-                    model_name=model_name,
-                    api_key=api_key
+                    model_name=model_name_extracted,
+                    api_key=text_api_key
                 )
+                # <<< Konec změny >>>
             except Exception as e:
                 import traceback
                 print(f"Chyba při extrakci metadat pomocí textové pipeline: {e}")
                 print(f"Podrobnosti chyby: {traceback.format_exc()}")
-                results['text'] = {}
-    
+                current_results = {}; current_timings = {}; current_token_usages = {}
+        
+        # Uložit výsledky, časy a tokeny
+        results[model] = current_results if current_results is not None else {}
+        all_timings[model] = current_timings if current_timings is not None else {}
+        all_token_usages[model] = current_token_usages if current_token_usages is not None else {} # Uložit tokeny
+
     # 5. Porovnání výsledků s referenčními daty
     comparison_results = {}
-    
     for model_name, model_results in results.items():
+        # Přeskočit modely bez výsledků
+        if not model_results:
+            print(f"Model {model_name} nemá žádné výsledky, přeskakuji porovnání.")
+            continue
+            
         print(f"\n=== Porovnávání výsledků modelu {model_name} ===")
         comparison = compare_all_metadata(model_results, reference_data)
         metrics = calculate_overall_metrics(comparison)
-        
+
         comparison_results[model_name] = {
             'comparison': comparison,
             'metrics': metrics
         }
-        
+
         # Uložení výsledků porovnání
-        comparison_output = RESULTS_DIR / f"{model_name}_comparison.json"
-        with open(comparison_output, 'w', encoding='utf-8') as f:
-            json.dump(comparison_results[model_name], f, ensure_ascii=False, indent=2)
-    
-    # 6. Sémantické porovnání (nový krok)
-    semantic_comparison_results = None
-    if not skip_semantic and len(comparison_results) >= 1:
+        comparison_output = get_run_results_dir() / f"{model_name}_comparison.json"
+        try:
+            with open(comparison_output, 'w', encoding='utf-8') as f:
+                json.dump(comparison_results[model_name], f, ensure_ascii=False, indent=2)
+            print(f"Výsledky porovnání pro {model_name} uloženy do {comparison_output}")
+        except Exception as e:
+             print(f"Chyba při ukládání porovnání pro {model_name}: {e}")
+
+    # 6. Sémantické porovnání (volitelné, pokud není přeskočeno a existují porovnávací soubory)
+    semantic_comparison_performed = False
+    comparison_files_for_plotting = {} # Slovník s finálními cestami pro vizualizaci
+
+    if not skip_semantic and comparison_results:
         print("\n=== Sémantické porovnání výsledků ===")
-        
-        # Cesty k souborům porovnání
-        comparison_files = {}
-        for model_name in comparison_results.keys():
-            comparison_files[model_name] = RESULTS_DIR / f"{model_name}_comparison.json"
-        
-        # Kontrola, zda existují potřebné soubory
-        if 'embedded' in comparison_files and os.path.exists(comparison_files['embedded']):
-            embedded_comparison_path = comparison_files['embedded']
-            
-            vlm_comparison_path = None
-            if 'vlm' in comparison_files and os.path.exists(comparison_files['vlm']):
-                vlm_comparison_path = comparison_files['vlm']
-            
-            text_comparison_path = None
-            if 'text' in comparison_files and os.path.exists(comparison_files['text']):
-                text_comparison_path = comparison_files['text']
-                
-            # Pokračovat pouze pokud máme alespoň VLM nebo text pipeline
-            if vlm_comparison_path or text_comparison_path:
-                # Výstupní soubor pro sémantické porovnání
-                semantic_output = RESULTS_DIR / "semantic_comparison_results.json"
-                
-                # Spuštění sémantického porovnání
-                print("Provádím sémantické porovnání výsledků...")
-                try:
-                    # Spuštění sémantického porovnání
-                    if vlm_comparison_path and text_comparison_path:
-                        # Pokud máme všechny tři, použijeme všechny
-                        vlm_updated, embedded_updated, text_updated = process_comparison_files(
-                            vlm_comparison_path, 
-                            embedded_comparison_path,
-                            semantic_output,
-                            text_comparison_path
-                        )
-                        
-                        # Uložení výsledků sémantického porovnání
-                        semantic_comparison_results = {
-                            'vlm': vlm_updated,
-                            'embedded': embedded_updated,
-                            'text': text_updated
-                        }
-                        
-                        # Nahrazení původních výsledků sémanticky vylepšenými
-                        comparison_results['vlm_semantic'] = vlm_updated
-                        comparison_results['embedded_semantic'] = embedded_updated
-                        comparison_results['text_semantic'] = text_updated
-                        
-                        print(f"Sémanticky vylepšené porovnání uloženo do {semantic_output}")
-                        print(f"Samostatné soubory uloženy jako:")
-                        print(f"- vlm_comparison_semantic.json")
-                        print(f"- embedded_comparison_semantic.json")
-                        print(f"- text_comparison_semantic.json")
-                        
-                    elif vlm_comparison_path:
-                        # Pokud máme jen VLM a embedded
-                        vlm_updated, embedded_updated = process_comparison_files(
-                            vlm_comparison_path, 
-                            embedded_comparison_path,
-                            semantic_output
-                        )
-                        
-                        # Uložení výsledků sémantického porovnání
-                        semantic_comparison_results = {
-                            'vlm': vlm_updated,
-                            'embedded': embedded_updated
-                        }
-                        
-                        # Nahrazení původních výsledků sémanticky vylepšenými
-                        comparison_results['vlm_semantic'] = vlm_updated
-                        comparison_results['embedded_semantic'] = embedded_updated
-                        
-                        print(f"Sémanticky vylepšené porovnání uloženo do {semantic_output}")
-                        print(f"Samostatné soubory uloženy jako:")
-                        print(f"- vlm_comparison_semantic.json")
-                        print(f"- embedded_comparison_semantic.json")
-                        
-                    elif text_comparison_path:
-                        # Pokud máme jen text a embedded
-                        embedded_updated, text_updated = process_comparison_files(
-                            embedded_comparison_path,
-                            embedded_comparison_path,
-                            semantic_output,
-                            text_comparison_path
-                        )
-                        
-                        # Uložení výsledků sémantického porovnání
-                        semantic_comparison_results = {
-                            'embedded': embedded_updated,
-                            'text': text_updated
-                        }
-                        
-                        # Nahrazení původních výsledků sémanticky vylepšenými
-                        comparison_results['embedded_semantic'] = embedded_updated
-                        comparison_results['text_semantic'] = text_updated
-                        
-                        print(f"Sémanticky vylepšené porovnání uloženo do {semantic_output}")
-                        print(f"Samostatné soubory uloženy jako:")
-                        print(f"- embedded_comparison_semantic.json")
-                        print(f"- text_comparison_semantic.json")
-                        
-                except Exception as e:
-                    print(f"Chyba při sémantickém porovnání: {e}")
+        try:
+            # Připravíme cesty k původním souborům porovnání
+            vlm_comp_path = get_run_results_dir() / "vlm_comparison.json" if "vlm" in comparison_results else None
+            emb_comp_path = get_run_results_dir() / "embedded_comparison.json" if "embedded" in comparison_results else None
+            txt_comp_path = get_run_results_dir() / "text_comparison.json" if "text" in comparison_results else None
+
+            # Odstraníme cesty k neexistujícím souborům
+            vlm_comp_path_str = str(vlm_comp_path) if vlm_comp_path and vlm_comp_path.exists() else None
+            emb_comp_path_str = str(emb_comp_path) if emb_comp_path and emb_comp_path.exists() else None
+            txt_comp_path_str = str(txt_comp_path) if txt_comp_path and txt_comp_path.exists() else None
+
+            if not emb_comp_path_str and not vlm_comp_path_str and not txt_comp_path_str:
+                 print("Nebyly nalezeny žádné soubory *_comparison.json pro sémantické zpracování.")
             else:
-                print("Sémantické porovnání přeskočeno - chybí výsledky VLM nebo text modelu.")
-        else:
-            print("Sémantické porovnání přeskočeno - chybí výsledky Embedded modelu.")
-    elif skip_semantic:
-        print("Sémantické porovnání přeskočeno (--skip-semantic).")
+                # Volání funkce pro sémantické porovnání
+                # Ta uloží *_comparison_semantic.json soubory do get_run_results_dir()
+                updated_semantic_data = process_comparison_files(
+                    output_dir=get_run_results_dir(), # Výstupní adresář je adresář tohoto běhu
+                    vlm_comparison_path=vlm_comp_path_str,
+                    embedded_comparison_path=emb_comp_path_str,
+                    text_comparison_path=txt_comp_path_str
+                )
+                
+                # Pokud porovnání proběhlo, nastavíme flag a aktualizujeme cesty
+                if updated_semantic_data:
+                    semantic_comparison_performed = True
+                    print("Sémantické porovnání dokončeno.")
+                    # Aktualizujeme cesty pro vizualizaci na sémantické verze
+                    for model_key in comparison_results.keys():
+                        semantic_file = get_run_results_dir() / f"{model_key}_comparison_semantic.json"
+                        if semantic_file.exists():
+                            comparison_files_for_plotting[model_key] = semantic_file
+                        else:
+                             # Pokud sémantický soubor nevznikl (např. chyba), použijeme původní
+                             original_file = get_run_results_dir() / f"{model_key}_comparison.json"
+                             if original_file.exists():
+                                 comparison_files_for_plotting[model_key] = original_file
+                else:
+                     print("Sémantické porovnání neproběhlo nebo nevrátilo žádná data.")
+
+        except Exception as e:
+            import traceback
+            print(f"Chyba během sémantického porovnání: {e}")
+            print(traceback.format_exc())
+    
+    # Pokud sémantické porovnání neproběhlo nebo bylo přeskočeno, použijeme původní soubory
+    if not semantic_comparison_performed:
+        print("Používám základní výsledky porovnání pro vizualizaci.")
+        for model_key in comparison_results.keys():
+             original_file = get_run_results_dir() / f"{model_key}_comparison.json"
+             if original_file.exists():
+                 comparison_files_for_plotting[model_key] = original_file
     
     # 7. Vizualizace výsledků
-    visualize_results(comparison_results, include_semantic=(semantic_comparison_results is not None))
+    visualize_results(comparison_files_for_plotting, all_timings, all_token_usages, include_semantic=semantic_comparison_performed)
     
-    return comparison_results
+    return comparison_results, all_timings, all_token_usages
 
 
-# Přidáno pro načítání dat z JSON
-def load_comparison_data(model_name, use_semantic=False):
-    """Načte data porovnání pro daný model."""
-    suffix = "_comparison_semantic.json" if use_semantic else "_comparison.json"
-    file_path = RESULTS_DIR / f"{model_name}{suffix}"
-    if file_path.exists():
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logging.error(f"Chyba při načítání souboru {file_path}: {e}")
-            return None
-    else:
-        # Hledáme i v podadresářích, pokud je model vnořený (např. z run_all_models)
-        # Jednoduchý příklad - hledá v RESULTS_DIR/[model_name]/[model_name]_comparison...
-        nested_file_path = RESULTS_DIR / model_name / f"{model_name}{suffix}"
-        if nested_file_path.exists():
-            logging.info(f"Nalezen vnořený soubor výsledků: {nested_file_path}")
-            try:
-                with open(nested_file_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logging.error(f"Chyba při načítání vnořeného souboru {nested_file_path}: {e}")
-                return None
-        logging.warning(f"Soubor s výsledky {file_path} (ani vnořený) nebyl nalezen.")
+# <<< Přidáno: Pomocná funkce pro načítání JSON dat >>>
+# Přesunuto sem, aby byla definována před prepare_plotting_data
+from src.utils.metadata_comparator import MetadataComparator # Import třídy pro METADATA_FIELDS
+import logging # Zajistit, že logging je dostupný
+
+def load_comparison_data_from_path(file_path: Path):
+    """Načte data porovnání z dané cesty."""
+    if not file_path or not file_path.exists():
+        logging.error(f"Soubor {file_path} neexistuje.")
         return None
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # Zde můžeme přidat robustnější načítání s podporou NaN, pokud je potřeba
+            # Prozatím standardní json.load
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        logging.error(f"Chyba při dekódování JSON v souboru {file_path}: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Obecná chyba při načítání souboru {file_path}: {e}")
+        return None
+# <<< Konec přidání >>>
 
 
-def prepare_plotting_data(models, include_semantic):
+def prepare_plotting_data(comparison_files, all_timings, all_token_usages, include_semantic):
     """
-    Připraví data pro vykreslování ze souborů s výsledky porovnání a časů extrakce.
+    Připraví data pro vykreslování ze souborů s výsledky porovnání a PŘEDANÝCH časů extrakce.
+    
+    Args:
+        comparison_files (dict): Slovník, kde klíč je název modelu a hodnota je Path k souboru
+                                 s výsledky porovnání (buď základní, nebo sémantický).
+        all_timings (dict): Slovník s časy extrakce pro každý model a dokument.
+        all_token_usages (dict): Slovník s počty tokenů pro každý model a dokument.
+        include_semantic (bool): Zda má vizualizace zahrnovat sémantické zlepšení.
+        
     Vrací DataFrame pro detailní výsledky a DataFrame pro souhrnné výsledky.
     """
-    logging.info(f"Spouštím prepare_plotting_data s modely: {models}, include_semantic: {include_semantic}")
+    logging.info(f"Spouštím prepare_plotting_data s include_semantic: {include_semantic}")
+    logging.info(f"Soubory k načtení: {comparison_files}")
     all_data = []
     detailed_scores = []
-    available_models = []
+    available_models = [] # Seznam modelů, pro které máme data
 
-    base_models = [m.replace('_semantic', '') for m in models]
-    base_models = sorted(list(set(base_models)))
-    logging.info(f"Zpracovávám základní modely: {base_models}")
+    # Získáme seznam názvů modelů ze slovníku souborů
+    model_names_from_files = list(comparison_files.keys())
 
-    for model in base_models:
+    for model in sorted(model_names_from_files):
         logging.info(f"-- Zpracovávám model: {model} --")
-        logging.info(f"Načítám základní data pro {model}...")
-        base_data = load_comparison_data(model, use_semantic=False)
-        if not base_data or ("results" not in base_data and "comparison" not in base_data):
-            logging.warning(f"Nebyly nalezeny nebo jsou neúplné/nevalidní základní výsledky pro model {model}, model bude přeskočen.")
+        
+        # Načteme finální data porovnání (mohou být základní nebo sémantická)
+        final_comparison_path = comparison_files.get(model)
+        if not final_comparison_path or not final_comparison_path.exists():
+             logging.warning(f"Soubor s výsledky porovnání pro model {model} nebyl nalezen v '{final_comparison_path}'. Model bude přeskočen.")
+             continue
+        
+        logging.info(f"Načítám finální data pro {model} z {final_comparison_path}...")
+        final_data = load_comparison_data_from_path(final_comparison_path)
+        if not final_data or "comparison" not in final_data:
+            logging.warning(f"Data porovnání pro model {model} jsou neúplná nebo nevalidní v souboru {final_comparison_path}. Model bude přeskočen.")
             continue
 
-        # <<< Načtení časů extrakce >>>
-        timing_file_path = RESULTS_DIR / f"{model}_timing.json"
-        model_timings = {}
-        try:
-            if timing_file_path.exists():
-                with open(timing_file_path, 'r') as f:
-                    model_timings = json.load(f)
-                logging.info(f"Načten soubor s časy: {timing_file_path}")
-            else:
-                 # Hledání ve vnořeném adresáři
-                 nested_timing_path = RESULTS_DIR / model / f"{model}_timing.json"
-                 if nested_timing_path.exists():
-                     with open(nested_timing_path, 'r') as f:
-                         model_timings = json.load(f)
-                     logging.info(f"Nalezen vnořený soubor s časy: {nested_timing_path}")
-                 else:
-                     logging.warning(f"Soubor s časy {timing_file_path} (ani vnořený) nebyl nalezen pro model {model}.")
-        except Exception as e:
-             logging.error(f"Chyba při načítání souboru s časy {timing_file_path} (nebo vnořeného): {e}")
-        # <<< Konec načtení časů >>>
+        # Načteme základní data porovnání VŽDY, pokud chceme zobrazit sémantické zlepšení
+        base_data = None
+        base_comparison_path = get_run_results_dir() / f"{model}_comparison.json"
+        if include_semantic and base_comparison_path.exists():
+            logging.info(f"Načítám základní data pro {model} z {base_comparison_path} pro výpočet zlepšení...")
+            base_data = load_comparison_data_from_path(base_comparison_path)
+            if not base_data or "comparison" not in base_data:
+                logging.warning(f"Základní data porovnání pro model {model} v {base_comparison_path} jsou neúplná nebo nevalidní. Sémantické zlepšení nebude možné spočítat.")
+                base_data = None # Resetujeme, aby se nepoužila neúplná data
+        elif include_semantic:
+             logging.warning(f"Základní soubor porovnání {base_comparison_path} nebyl nalezen. Sémantické zlepšení nebude možné spočítat.")
 
-        base_results_key = "results" if "results" in base_data else "comparison"
-        logging.debug(f"Klíč pro výsledky v base_data: {base_results_key}")
-        available_models.append(model.upper())
+        # Pokud sémantické porovnání neproběhlo (include_semantic=False) nebo se nepodařilo načíst base_data,
+        # pak base_data budou stejná jako final_data pro účely výpočtu (zlepšení bude 0)
+        if not base_data:
+            base_data = final_data
+            logging.debug(f"Používám finální data jako základní pro model {model}.")
 
-        semantic_data = None
-        comparison_source = "base"
-        final_data_source = base_data
-        final_results_key = base_results_key
+        model_timings = all_timings.get(model, {})
+        model_token_usages = all_token_usages.get(model, {}) # Získat tokeny
+        if not model_timings: logging.warning(f"Data o časech pro {model} nebyla nalezena.")
+        if not model_token_usages: logging.warning(f"Data o tokenech pro {model} nebyla nalezena.")
 
-        if include_semantic:
-            logging.info(f"Načítám sémantická data pro {model}...")
-            semantic_data = load_comparison_data(model, use_semantic=True)
-            if not semantic_data or ("results" not in semantic_data and "comparison" not in semantic_data):
-                logging.warning(f"Nebyly nalezeny nebo jsou neúplné/nevalidní sémantické výsledky pro model {model}, použijí se základní.")
-            else:
-                 semantic_results_key = "results" if "results" in semantic_data else "comparison"
-                 logging.debug(f"Klíč pro výsledky v semantic_data: {semantic_results_key}")
-                 comparison_source = "semantic"
-                 final_data_source = semantic_data
-                 final_results_key = semantic_results_key
-                 logging.info(f"Použiji sémantická data (klíč: {final_results_key}) pro {model}.")
+        # Přidáváme model do available_models, pouze pokud má data
+        if final_data.get("comparison"): # Ověříme, že máme co porovnávat
+            available_models.append(model.upper())
+        else:
+            logging.warning(f"Finální data pro model {model} jsou prázdná ({final_comparison_path}), nepřidávám do available_models.")
+            continue # Přeskočit model bez dat
 
-        logging.info(f"Počet dokumentů ve final_data_source ({comparison_source}, klíč: {final_results_key}) pro {model}: {len(final_data_source.get(final_results_key, {}))}")
+        comparison_source = "semantic" if include_semantic and final_comparison_path.name.endswith("_semantic.json") else "base"
+        logging.info(f"Zdroj porovnání pro {model}: {comparison_source}")
 
+        final_comparison_dict = final_data.get("comparison", {})
+        base_comparison_dict = base_data.get("comparison", {})
+        logging.info(f"Počet dokumentů ve final_comparison_dict pro {model}: {len(final_comparison_dict)}")
+        
         docs_processed = 0
         fields_processed = 0
-        # Procházíme klíče dokumentů z finálního zdroje dat (může být base nebo semantic)
-        doc_ids_to_process = list(final_data_source.get(final_results_key, {}).keys())
-        logging.info(f"Nalezeno {len(doc_ids_to_process)} ID dokumentů ke zpracování.")
+        doc_ids_to_process = list(final_comparison_dict.keys())
+        logging.info(f"Nalezeno {len(doc_ids_to_process)} ID dokumentů ke zpracování pro {model}.")
         
         for doc_id in doc_ids_to_process:
-            doc_results = final_data_source.get(final_results_key, {}).get(doc_id)
+            final_doc_results = final_comparison_dict.get(doc_id)
+            base_doc_results = base_comparison_dict.get(doc_id) # Může být None
             
-            # Kontrola, zda máme výsledky pro tento dokument
-            if not doc_results:
-                logging.warning(f"Přeskakuji doc_id {doc_id}, nenalezeny výsledky ve final_data_source.")
+            if not final_doc_results:
+                logging.warning(f"Přeskakuji doc_id {doc_id} pro model {model}, nenalezeny finální výsledky.")
                 continue
 
             docs_processed += 1
-            doc_comparison = {}
-            if isinstance(doc_results, dict) and "comparison" in doc_results:
-                doc_comparison = doc_results.get("comparison", {})
-            elif isinstance(doc_results, dict):
-                 doc_comparison = doc_results
-                 logging.debug(f"Dokument {doc_id} nemá klíč 'comparison', používám přímo obsah.")
-            else:
-                logging.warning(f"Neočekávaný formát pro doc_results u {doc_id}: {type(doc_results)}. Přeskakuji dokument.")
-                continue
-
-            if not doc_comparison:
-                logging.debug(f"Dokument {doc_id} neobsahuje data pro porovnání. Přeskakuji.")
-                continue
-
-            # <<< Získání času pro dokument >>>
-            # Používáme str(doc_id) pro konzistenci s JSON klíči
+            
+            # Získat čas a tokeny pro tento dokument
             duration = model_timings.get(str(doc_id))
-            if duration is None or duration < 0: # Zahrnuje i náš indikátor chyby -1.0
-                logging.debug(f"Čas pro dokument {doc_id} modelu {model} nebyl nalezen nebo je neplatný ({duration}). Nastavuji na NaN.")
-                duration = np.nan # Použít NaN pro chybějící/neplatné časy
-            # <<< Konec získání času >>>
+            if duration is None or duration < 0: duration = np.nan
+            
+            doc_token_usage = model_token_usages.get(str(doc_id), {"input_tokens": 0, "output_tokens": 0}) # Default
+            input_tokens = doc_token_usage.get("input_tokens", 0)
+            output_tokens = doc_token_usage.get("output_tokens", 0)
 
-            # Iterujeme přes pole definovaná ve třídě, ne přes výsledky (kvůli konzistenci)
-            # Předpokládáme, že METADATA_FIELDS jsou definována někde globálně nebo importována
-            # Pokud ne, museli bychom je získat jinak (např. z prvního dokumentu)
-            defined_fields = [
-                'title', 'authors', 'abstract', 'keywords', 'doi', 'year',
-                'journal', 'volume', 'issue', 'pages', 'publisher', 'references'
-            ] # TODO: Možná lépe načíst dynamicky?
+            defined_fields = [f for f in MetadataComparator.METADATA_FIELDS]
             
             for field in defined_fields:
-                scores_or_value = doc_comparison.get(field)
-                similarity = 0
-                
-                # Zpracování hodnoty - může být dict nebo float
-                if isinstance(scores_or_value, dict):
-                    similarity = scores_or_value.get("similarity", 0)
-                elif isinstance(scores_or_value, (float, int)):
-                    similarity = float(scores_or_value)
-                # Pokud pole chybí v porovnání, similarity zůstane 0
-                elif scores_or_value is None:
-                    logging.debug(f"Pole '{field}' chybí v porovnání pro doc_id {doc_id}. Similarity bude 0.")
+                final_scores_or_value = final_doc_results.get(field)
+                final_similarity = 0
+                if isinstance(final_scores_or_value, dict):
+                    final_similarity = final_scores_or_value.get("similarity", 0)
+                elif isinstance(final_scores_or_value, (float, int)):
+                    final_similarity = float(final_scores_or_value)
+                elif final_scores_or_value is None:
+                     pass # final_similarity zůstane 0
                 else:
-                    logging.warning(f"Neočekávaný typ hodnoty pro pole {field} u {doc_id}: {type(scores_or_value)}. Similarity bude 0.")
-                
-                fields_processed += 1 # Počítáme i pole s nulovou podobností
+                    logging.warning(f"Neočekávaný typ finální hodnoty pro pole {field} u {doc_id}/{model}: {type(final_scores_or_value)}. Similarity bude 0.")
 
-                detailed_scores.append({
-                    "doc_id": str(doc_id), # Ukládat jako string
-                    "model": model.upper(),
-                    "field": field,
-                    "similarity": similarity,
-                    "source": comparison_source,
-                    "duration": duration # Přidáno (bude NaN pokud čas chybí)
-                })
-
-                # Získání základního skóre (musí také zvládnout oba formáty a chybějící pole)
                 base_similarity_score = 0
-                try:
-                    base_doc_data = base_data.get(base_results_key, {}).get(str(doc_id), {})
-                    base_comparison_data = {}
-                    if isinstance(base_doc_data, dict) and "comparison" in base_doc_data:
-                         base_comparison_data = base_doc_data.get("comparison", {})
-                    elif isinstance(base_doc_data, dict): # Přímý přístup
-                         base_comparison_data = base_doc_data
-
-                    base_scores_or_value = base_comparison_data.get(field)
+                if base_doc_results:
+                    base_scores_or_value = base_doc_results.get(field)
                     if isinstance(base_scores_or_value, dict):
                         base_similarity_score = base_scores_or_value.get("similarity", 0)
                     elif isinstance(base_scores_or_value, (float, int)):
                         base_similarity_score = float(base_scores_or_value)
-                except Exception as e:
-                    logging.debug(f"Chyba při hledání základního skóre pro {doc_id}/{field}: {e}")
+                    elif base_scores_or_value is None:
+                         pass # base_similarity_score zůstane 0
+                    else:
+                         logging.warning(f"Neočekávaný typ základní hodnoty pro pole {field} u {doc_id}/{model}: {type(base_scores_or_value)}. Similarity bude 0.")
+                else:
+                    # Pokud nemáme base_doc_results (např. chyba načítání), použijeme finální jako základní
+                    base_similarity_score = final_similarity
 
-                semantic_improvement = max(0, similarity - base_similarity_score) if comparison_source == "semantic" else 0
+                # <<< OPRAVA: Zajistit, že hodnoty jsou čísla před odečtením >>>
+                # Převedeme None nebo NaN na 0.0
+                final_similarity_num = float(final_similarity) if pd.notna(final_similarity) else 0.0
+                base_similarity_score_num = float(base_similarity_score) if pd.notna(base_similarity_score) else 0.0
+                
+                # Výpočet sémantického zlepšení
+                semantic_improvement = 0
+                if include_semantic and final_comparison_path.name.endswith("_semantic.json"):
+                     # Odečítáme až poté, co jsme zajistili, že jde o čísla
+                     semantic_improvement = max(0.0, final_similarity_num - base_similarity_score_num)
+                else:
+                    # Pokud nezahrnujeme sémantiku nebo finální data nejsou sémantická,
+                    # pak base = final a zlepšení je 0. Upravíme i base_similarity_score_num pro konzistenci.
+                    base_similarity_score_num = final_similarity_num
+                # <<< KONEC OPRAVY >>>
+                
+                fields_processed += 1
+
+                detailed_scores.append({
+                    "doc_id": str(doc_id),
+                    "model": model.upper(),
+                    "field": field,
+                    "similarity": final_similarity_num,
+                    "source": comparison_source,
+                    "duration": duration,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens
+                })
 
                 all_data.append({
-                    "doc_id": str(doc_id), # Ukládat jako string
+                    "doc_id": str(doc_id),
                     "Model": model.upper(),
                     "Field": field,
-                    "Base_Similarity": base_similarity_score,
+                    "Base_Similarity": base_similarity_score_num,
                     "Semantic_Improvement": semantic_improvement,
-                    "Total_Similarity": similarity,
-                    "Duration": duration # Přidáno (bude NaN pokud čas chybí)
+                    "Total_Similarity": final_similarity_num,
+                    "Duration": duration,
+                    "Input_Tokens": input_tokens,
+                    "Output_Tokens": output_tokens
                 })
-        logging.info(f"Pro model {model} zpracováno {docs_processed} dokumentů a {fields_processed} záznamů polí (včetně chybějících).")
+        logging.info(f"Pro model {model} zpracováno {docs_processed} dokumentů a {fields_processed} záznamů polí.")
 
     if not all_data:
         logging.error("Chyba: Nebyla nalezena žádná data k vizualizaci po zpracování všech modelů.")
@@ -689,37 +647,47 @@ def prepare_plotting_data(models, include_semantic):
         summary_stats = pd.DataFrame()
 
 
-    # --- Výpočet statistik pro celkový graf (včetně času) ---
+    # --- Výpočet statistik pro celkový graf (včetně času a tokenů) ---
     try:
-        # <<< Změna: Přidat agregaci času na úrovni dokumentu >>>
-        # Agregujeme podobnost a vezmeme PRVNÍ platnou hodnotu času pro daný dokument/model
-        # Protože čas by měl být stejný pro všechna pole daného dokumentu
+        # Agregace na úrovni dokumentu
         overall_per_doc = plot_df_agg.groupby(['Model', 'doc_id']).agg(
             Doc_Base_Overall=('Base_Similarity', 'mean'),
             Doc_Total_Overall=('Total_Similarity', 'mean'),
-            Duration=('Duration', 'first') # Vezmeme první hodnotu (měla by být stejná, nebo NaN)
+            Duration=('Duration', 'first'),
+            Input_Tokens=('Input_Tokens', 'first'), # Tokeny jsou stejné pro všechna pole dokumentu
+            Output_Tokens=('Output_Tokens', 'first')
         ).reset_index()
 
-        # Nyní agregujeme průměry a směrodatné odchylky přes všechny dokumenty pro každý model
+        # Agregace přes všechny dokumenty pro každý model
         overall_summary = overall_per_doc.groupby('Model').agg(
             Mean_Base_Overall=('Doc_Base_Overall', 'mean'),
             Std_Base_Overall=('Doc_Base_Overall', 'std'),
             Mean_Total_Overall=('Doc_Total_Overall', 'mean'),
             Std_Total_Overall=('Doc_Total_Overall', 'std'),
-            Mean_Duration=('Duration', 'mean'),  # Průměrný čas na dokument (ignoruje NaN)
-            Std_Duration=('Duration', 'std')     # Směrodatná odchylka času (ignoruje NaN)
+            Mean_Duration=('Duration', 'mean'),
+            Std_Duration=('Duration', 'std'),
+            Total_Input_Tokens=('Input_Tokens', 'sum'), # Celkový součet tokenů
+            Total_Output_Tokens=('Output_Tokens', 'sum')
         ).reset_index()
 
-        overall_summary['Mean_Improvement'] = overall_summary['Mean_Total_Overall'] - overall_summary['Mean_Base_Overall']
-        # Doplnění chybějících std dev (pokud byl jen jeden dokument nebo všechny časy byly NaN)
+        # Výpočet zlepšení
+        overall_summary['Mean_Improvement'] = overall_summary['Mean_Total_Overall'].subtract(overall_summary['Mean_Base_Overall'], fill_value=0)
+        
+        # Doplnění chybějících hodnot
         overall_summary.fillna({
             'Std_Base_Overall': 0,
             'Std_Total_Overall': 0,
-            'Std_Duration': 0
+            'Std_Duration': 0,
+            'Mean_Improvement': 0,
+            'Total_Input_Tokens': 0, # Pokud by byly všechny NaN
+            'Total_Output_Tokens': 0
         }, inplace=True)
-        # <<< Konec změny >>>
+        
+        # Převedení tokenů na integer
+        overall_summary['Total_Input_Tokens'] = overall_summary['Total_Input_Tokens'].astype(int)
+        overall_summary['Total_Output_Tokens'] = overall_summary['Total_Output_Tokens'].astype(int)
+
         logging.info(f"Vytvořen overall_summary DataFrame s {len(overall_summary)} řádky.")
-        # logging.debug(f"Náhled overall_summary:\n{overall_summary.to_string()}")
     except Exception as e:
         logging.error(f"Chyba při agregaci overall_summary: {e}")
         overall_summary = pd.DataFrame()
@@ -764,7 +732,9 @@ def plot_comparison_boxplot(detailed_df, filename="comparison_results_boxplot.pn
     plt.legend(title='Model', bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.ylim(0, 1.05)
     plt.tight_layout(rect=[0, 0, 0.85, 1]) # Upravit layout pro legendu mimo
-    filepath = RESULTS_DIR / filename
+    # <<< Změna: Použití get_run_results_dir() >>>
+    filepath = get_run_results_dir() / filename
+    # <<< Konec změny >>>
     try:
         plt.savefig(filepath)
         print(f"Box plot porovnání polí uložen do {filepath}")
@@ -790,7 +760,9 @@ def plot_overall_boxplot(detailed_df, filename="overall_results_boxplot.png"):
     plt.ylabel('Průměrné skóre podobnosti dokumentu')
     plt.ylim(0, 1.05)
     plt.tight_layout()
-    filepath = RESULTS_DIR / filename
+    # <<< Změna: Použití get_run_results_dir() >>>
+    filepath = get_run_results_dir() / filename
+    # <<< Konec změny >>>
     try:
         plt.savefig(filepath)
         print(f"Celkový box plot uložen do {filepath}")
@@ -798,11 +770,17 @@ def plot_overall_boxplot(detailed_df, filename="overall_results_boxplot.png"):
         print(f"Chyba při ukládání grafu {filepath}: {e}")
     plt.close()
 
-def visualize_results(comparison_results, include_semantic=False):
+def visualize_results(comparison_files, all_timings, all_token_usages, include_semantic=False):
     """
     Vykreslí porovnání výsledků modelů s error bary a box ploty.
+    Přidána all_token_usages.
     """
-    summary_stats, overall_summary, detailed_scores_df = prepare_plotting_data(list(comparison_results.keys()), include_semantic)
+    summary_stats, overall_summary, detailed_scores_df = prepare_plotting_data(
+        comparison_files, 
+        all_timings, 
+        all_token_usages,
+        include_semantic
+    )
 
     if summary_stats.empty or overall_summary.empty:
         print("Nelze vykreslit grafy - chybí data.")
@@ -813,17 +791,16 @@ def visualize_results(comparison_results, include_semantic=False):
         print("Žádné modely s daty pro vizualizaci.")
         return
 
-    # Definice barev
+    # Definice barev - AKTUALIZOVÁNO
     base_colors = {
-        'EMBEDDED': 'skyblue',
-        'VLM': 'lightcoral',
-        'TEXT': 'lightgreen',
+        'EMBEDDED': '#3F5FDE', # Tmavší modrá
+        'VLM': '#FF4747',      # Tmavší červeno-oranžová
+        'TEXT': '#292F36',    # Tmavší zelená
     }
-    # <<< ZMĚNA: Definice světlejších barev pro sémantické zlepšení >>>
     lighter_semantic_colors = {
-        'EMBEDDED': 'lightsteelblue', # Světlejší než steelblue
-        'VLM': 'salmon',           # Světlejší než indianred
-        'TEXT': 'palegreen'        # Světlejší než seagreen
+        'EMBEDDED': '#B7C3F3',      # Světlejší modrá
+        'VLM': '#FF6B6B',    # Světlejší červeno-oranžová
+        'TEXT': '#586574'       # Světlejší zelená
     }
     # Použít jen barvy pro modely, které máme
     colors = {m: base_colors.get(m, 'grey') for m in model_names}
@@ -879,7 +856,9 @@ def visualize_results(comparison_results, include_semantic=False):
     # <<< KONEC ZMĚNY legendy >>>
 
     plt.tight_layout(rect=[0, 0, 0.85, 1])
-    filepath = RESULTS_DIR / "comparison_results.png"
+    # <<< Změna: Použití get_run_results_dir() >>>
+    filepath = get_run_results_dir() / "comparison_results.png"
+    # <<< Konec změny >>>
     try:
         plt.savefig(filepath)
         print(f"Graf porovnání polí uložen do {filepath}")
@@ -917,7 +896,9 @@ def visualize_results(comparison_results, include_semantic=False):
     # Legenda zde není nutná, protože ji máme v detailním grafu
     plt.legend().set_visible(False)
     plt.tight_layout()
-    filepath = RESULTS_DIR / "overall_results.png"
+    # <<< Změna: Použití get_run_results_dir() >>>
+    filepath = get_run_results_dir() / "overall_results.png"
+    # <<< Konec změny >>>
     try:
         plt.savefig(filepath)
         print(f"Graf celkových výsledků uložen do {filepath}")
@@ -931,52 +912,99 @@ def visualize_results(comparison_results, include_semantic=False):
 
     # Uložení nových souhrnných tabulek
     try:
-        summary_stats_path = RESULTS_DIR / "summary_results.csv"
-        # Přidáme sloupec s průměrnou dobou trvání i sem?
-        # Možná lepší nechat summary_stats jen pro podobnost a overall pro vše
+        summary_stats_path = get_run_results_dir() / "summary_results.csv"
         summary_stats.to_csv(summary_stats_path, index=False, float_format='%.4f')
         print(f"Souhrnné statistiky (průměr, std dev) uloženy do {summary_stats_path}")
 
-        overall_summary_path = RESULTS_DIR / "overall_summary_results.csv"
-        # Zajistíme správné pořadí sloupců pro lepší čitelnost
+        overall_summary_path = get_run_results_dir() / "overall_summary_results.csv"
+        # Zajistíme správné pořadí sloupců včetně tokenů
         cols_order = [
             'Model', 'Mean_Total_Overall', 'Std_Total_Overall',
-            'Mean_Duration', 'Std_Duration', 'Mean_Base_Overall',
-            'Std_Base_Overall', 'Mean_Improvement'
+            'Mean_Duration', 'Std_Duration',
+            'Total_Input_Tokens', 'Total_Output_Tokens',
+            'Mean_Base_Overall', 'Std_Base_Overall', 'Mean_Improvement'
         ]
-        # Zahrnout pouze sloupce, které skutečně existují v DataFrame
         final_cols_order = [col for col in cols_order if col in overall_summary.columns]
         overall_summary[final_cols_order].to_csv(overall_summary_path, index=False, float_format='%.4f')
-        print(f"Celkové souhrnné statistiky (včetně času) uloženy do {overall_summary_path}")
+        print(f"Celkové souhrnné statistiky (včetně času a tokenů) uloženy do {overall_summary_path}")
 
-        detailed_scores_path = RESULTS_DIR / "detailed_scores_all.csv"
-        # Zajistíme pořadí sloupců
+        detailed_scores_path = get_run_results_dir() / "detailed_scores_all.csv"
+        # Přidat tokeny i sem?
         detailed_cols = [
-            'doc_id', 'model', 'field', 'similarity', 'duration', 'source'
+            'doc_id', 'model', 'field', 'similarity', 'duration', 
+            'input_tokens', 'output_tokens', 'source'
         ]
         final_detailed_cols = [col for col in detailed_cols if col in detailed_scores_df.columns]
         detailed_scores_df[final_detailed_cols].to_csv(detailed_scores_path, index=False, float_format='%.4f')
-        print(f"Detailní skóre (včetně času) pro box ploty uloženy do {detailed_scores_path}")
+        print(f"Detailní skóre (včetně času a tokenů) uloženy do {detailed_scores_path}")
 
     except Exception as e:
         print(f"Chyba při ukládání CSV souborů: {e}")
 
 
-    # Výpis celkových výsledků (průměr ± std dev) - včetně času
-    print("\nCelkové výsledky (průměr ± std dev):")
-    # Použijeme overall_summary pro výpis, který již obsahuje NaN ošetření
+    # Výpis celkových výsledků (včetně času a tokenů)
+    print("\nCelkové výsledky (průměr ± std dev, celkové tokeny):")
     for _, row in overall_summary.iterrows():
-        # <<< Změna: Přidat výpis času a ošetřit NaN >>>
         similarity_str = f"{row['Mean_Total_Overall']:.4f} ± {row['Std_Total_Overall']:.4f}"
         duration_str = f"{row['Mean_Duration']:.2f}s ± {row['Std_Duration']:.2f}s" if pd.notna(row['Mean_Duration']) else "N/A"
-        print(f"Model {row['Model']}: Podobnost={similarity_str}, Čas={duration_str} ", end="")
-        # <<< Konec změny >>>
+        token_str = f"Tokens(In={row['Total_Input_Tokens']}, Out={row['Total_Output_Tokens']})"
+        print(f"Model {row['Model']}: Podobnost={similarity_str}, Čas={duration_str}, {token_str} ", end="")
         if include_semantic and 'Mean_Base_Overall' in row and 'Mean_Improvement' in row and pd.notna(row['Mean_Base_Overall']):
-             # Kontrola existence sloupců pro případ chyby při agregaci
              print(f"(základní: {row['Mean_Base_Overall']:.4f}, zlepšení: +{row['Mean_Improvement']:.4f})")
         else:
-             print() # Jen nový řádek
+             print()
 
+def generate_graphs_only():
+    """
+    Generuje grafy z existujících souborů s výsledky bez spouštění extrakce.
+    """
+    print("\n=== Generování grafů z existujících výsledků ===")
+    
+    # Kontrola existence potřebných souborů
+    comparison_files = {}
+    all_timings = {}
+    all_token_usages = {}
+    
+    # Kontrola existence souborů porovnání pro různé modely
+    for model in ['embedded', 'vlm', 'text']:
+        # Nejprve zkusíme sémantické porovnání (priorita)
+        semantic_comparison_file = get_run_results_dir() / f"{model}_comparison_semantic.json"
+        basic_comparison_file = get_run_results_dir() / f"{model}_comparison.json"
+        
+        if semantic_comparison_file.exists():
+            comparison_files[model] = semantic_comparison_file
+            print(f"Nalezen soubor sémantického porovnání pro {model}: {semantic_comparison_file}")
+        elif basic_comparison_file.exists():
+            comparison_files[model] = basic_comparison_file
+            print(f"Nalezen soubor základního porovnání pro {model}: {basic_comparison_file}")
+    
+    # Kontrola existence souborů s výsledky pro získání časů
+    for model in ['embedded', 'vlm', 'text']:
+        results_file = get_run_results_dir() / f"{model}_results.json"
+        if results_file.exists():
+            try:
+                with open(results_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if 'timings' in data:
+                        all_timings[model] = data['timings']
+                    if 'token_usages' in data:
+                        all_token_usages[model] = data['token_usages']
+                print(f"Načteny časy a tokeny z {results_file}")
+            except Exception as e:
+                print(f"Chyba při načítání {results_file}: {e}")
+    
+    if not comparison_files:
+        print("Nebyly nalezeny žádné soubory s výsledky porovnání. Nelze vygenerovat grafy.")
+        return
+    
+    # Zjistíme, zda by mělo být zahrnuto sémantické porovnání
+    include_semantic = any(str(path).endswith("_semantic.json") for path in comparison_files.values())
+    
+    # Generování grafů a tabulek
+    print(f"Generování grafů z {len(comparison_files)} modelů, sémantické porovnání: {include_semantic}")
+    visualize_results(comparison_files, all_timings, all_token_usages, include_semantic)
+    
+    print("Generování grafů dokončeno.")
 
 def main():
     """
@@ -992,8 +1020,23 @@ def main():
     parser.add_argument('--skip-semantic', action='store_true', help='Přeskočí sémantické porovnání výsledků')
     parser.add_argument('--force-extraction', action='store_true', help='Vynutí novou extrakci metadat i když výsledky již existují')
     parser.add_argument('--config', type=str, default=None, help='Cesta ke konfiguračnímu souboru modelů')
+    # <<< Změna: Přidání argumentu pro výstupní adresář >>>
+    parser.add_argument('--output-dir', type=str, default=None, help='Adresář pro uložení výsledků tohoto běhu')
+    # <<< Konec změny >>>
+    parser.add_argument('--graphs-only', action='store_true', help="Spustí pouze generování grafů z existujících výsledků")
     
     args = parser.parse_args()
+    
+    # <<< Změna: Nastavení adresáře pro výsledky běhu >>>
+    if args.output_dir:
+        # Použijeme adresář z argumentu (pro volání z run_all_models.py)
+        run_dir = Path(args.output_dir).resolve()
+    else:
+        # Vygenerujeme nový adresář s časovým razítkem
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = BASE_DIR / "results" / f"main_{timestamp}"
+    set_run_results_dir(run_dir)
+    # <<< Konec změny >>>
     
     # Nastavení úrovně logování
     if args.verbose:
@@ -1020,10 +1063,17 @@ def main():
     if args.force_extraction:
         # Odstranění existujících souborů s výsledky
         for model in args.models:
-            result_file = RESULTS_DIR / f"{model}_results.json"
+             # <<< Změna: Použití get_run_results_dir() >>>
+            result_file = get_run_results_dir() / f"{model}_results.json"
+             # <<< Konec změny >>>
             if result_file.exists():
                 print(f"Odstraňuji existující výsledky: {result_file}")
                 result_file.unlink()
+    
+    # Zpracování parametru --graphs-only
+    if args.graphs_only:
+        generate_graphs_only()
+        return
     
     start_time = time.time()
     

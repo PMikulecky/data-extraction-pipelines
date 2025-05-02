@@ -60,7 +60,7 @@ class OpenAITextModelProvider(TextModelProvider):
         if "model_name" in kwargs:
             self.model_name = kwargs["model_name"]
     
-    def generate_text(self, prompt: str, **kwargs) -> str:
+    def generate_text(self, prompt: str, **kwargs) -> tuple[str, dict]:
         """
         Generuje text na základě promptu pomocí OpenAI API.
         
@@ -69,7 +69,7 @@ class OpenAITextModelProvider(TextModelProvider):
             **kwargs: Další parametry pro generování textu
             
         Returns:
-            Vygenerovaný text
+            tuple: Vygenerovaný text a slovník s počty tokenů ({'input_tokens': N, 'output_tokens': M})
         """
         # Příprava dotazu pro API
         headers = {
@@ -100,12 +100,21 @@ class OpenAITextModelProvider(TextModelProvider):
         )
         
         # Zpracování odpovědi
+        token_usage = {"input_tokens": 0, "output_tokens": 0} # Default
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            response_data = response.json()
+            text_content = response_data["choices"][0]["message"]["content"]
+            # Extrahovat token usage, pokud existuje
+            if "usage" in response_data:
+                usage_data = response_data["usage"]
+                token_usage["input_tokens"] = usage_data.get("prompt_tokens", 0)
+                token_usage["output_tokens"] = usage_data.get("completion_tokens", 0)
+            return text_content, token_usage
         else:
             error_msg = f"Chyba při dotazu na OpenAI API: {response.status_code} - {response.text}"
             print(error_msg)
-            raise Exception(error_msg)
+            # I při chybě vrátíme prázdný string a nulové tokeny
+            return "", token_usage
     
     def get_available_models(self) -> List[str]:
         """
@@ -174,7 +183,7 @@ class OpenAIVisionModelProvider(VisionModelProvider):
         image.save(buffered, format="JPEG")
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
     
-    def generate_text_from_image(self, image: Image.Image, prompt: str, **kwargs) -> str:
+    def generate_text_from_image(self, image: Image.Image, prompt: str, **kwargs) -> tuple[str, dict]:
         """
         Generuje text na základě obrázku a promptu pomocí OpenAI API.
         
@@ -184,7 +193,7 @@ class OpenAIVisionModelProvider(VisionModelProvider):
             **kwargs: Další parametry pro generování textu
             
         Returns:
-            Vygenerovaný text
+            tuple: Vygenerovaný text a slovník s počty tokenů ({'input_tokens': N, 'output_tokens': M})
         """
         # Zakódování obrázku
         base64_image = self.encode_image(image)
@@ -227,12 +236,21 @@ class OpenAIVisionModelProvider(VisionModelProvider):
         )
         
         # Zpracování odpovědi
+        token_usage = {"input_tokens": 0, "output_tokens": 0} # Default
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
+            response_data = response.json()
+            text_content = response_data["choices"][0]["message"]["content"]
+            # Extrahovat token usage, pokud existuje
+            if "usage" in response_data:
+                usage_data = response_data["usage"]
+                token_usage["input_tokens"] = usage_data.get("prompt_tokens", 0)
+                token_usage["output_tokens"] = usage_data.get("completion_tokens", 0)
+            return text_content, token_usage
         else:
             error_msg = f"Chyba při dotazu na OpenAI Vision API: {response.status_code} - {response.text}"
             print(error_msg)
-            raise Exception(error_msg)
+            # I při chybě vrátíme prázdný string a nulové tokeny
+            return "", token_usage
     
     def get_available_models(self) -> List[str]:
         """

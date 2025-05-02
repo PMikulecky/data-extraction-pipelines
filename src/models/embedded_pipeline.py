@@ -14,10 +14,13 @@ from tqdm import tqdm
 import PyPDF2
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
+import time
+import shutil
 
 # Import pro poskytovatele modelů
-from .providers.factory import ModelProviderFactory
-from .config.model_config import get_config
+from src.models.providers.factory import ModelProviderFactory
+from src.models.config.model_config import get_config
+from src.config.runtime_config import get_run_results_dir
 
 from dotenv import load_dotenv
 
@@ -73,7 +76,7 @@ class EmbeddedPipeline:
         'references': "Uveď seznam referencí citovaných v této akademické práci. Vrať pouze seznam referencí bez jakéhokoliv dalšího textu."
     }
     
-    def __init__(self, model_name=None, chunk_size=1000, chunk_overlap=200, provider_name=None, api_key=None, embedding_model_name=None, embedding_provider_name=None, vectorstore_path=None):
+    def __init__(self, model_name=None, chunk_size=1000, chunk_overlap=200, provider_name=None, api_key=None, embedding_model_name=None, embedding_provider_name=None, vectorstore_path=None, text_api_key=None, embedding_api_key=None):
         """
         Inicializace Embedded pipeline.
         
@@ -86,6 +89,8 @@ class EmbeddedPipeline:
             embedding_model_name (str, optional): Název modelu pro embeddings
             embedding_provider_name (str, optional): Název poskytovatele API pro embeddings
             vectorstore_path (str, optional): Cesta k adresáři pro vectorstore
+            text_api_key (str, optional): API klíč pro textový model
+            embedding_api_key (str, optional): API klíč pro embedding model
         """
         # Načtení konfigurace
         config = get_config()
@@ -101,6 +106,8 @@ class EmbeddedPipeline:
         self.chunk_overlap = chunk_overlap
         self.api_key = api_key
         self.vectorstore_path = vectorstore_path or str(VECTORSTORE_DIR / "embedded_pipeline")
+        self.text_api_key = text_api_key
+        self.embedding_api_key = embedding_api_key
         
         # Inicializace komponent
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -113,14 +120,14 @@ class EmbeddedPipeline:
         self.text_provider = ModelProviderFactory.create_text_provider(
             provider_name=self.provider_name,
             model_name=self.model_name,
-            api_key=self.api_key
+            api_key=self.text_api_key
         )
         
         # Inicializace poskytovatele modelu pro embeddings
         self.embedding_provider = ModelProviderFactory.create_embedding_provider(
             provider_name=self.embedding_provider_name,
             model_name=self.embedding_model_name,
-            api_key=self.api_key
+            api_key=self.embedding_api_key
         )
         
         # Inicializace vectorstore
@@ -128,30 +135,6 @@ class EmbeddedPipeline:
         
         print(f"Inicializován textový model: {self.model_name} od poskytovatele: {self.provider_name}")
         print(f"Inicializován embedding model: {self.embedding_model_name} od poskytovatele: {self.embedding_provider_name}")
-    
-    def initialize_vectorstore(self):
-        """
-        Inicializuje vectorstore. Pokud již existuje, načte ho, jinak vytvoří nový.
-        """
-        os.makedirs(self.vectorstore_path, exist_ok=True)
-        
-        # Kontrola, zda už existuje vectorstore
-        if os.path.exists(os.path.join(self.vectorstore_path, "chroma.sqlite3")):
-            print(f"Načítám existující vectorstore z {self.vectorstore_path}")
-            
-            # Použití adapteru pro embedding provider
-            embedding_function = self.embedding_provider.get_embedding_function()
-            
-            # Načtení existujícího vectorstore
-            self.vectorstore = Chroma(
-                persist_directory=self.vectorstore_path,
-                embedding_function=embedding_function
-            )
-        else:
-            print(f"Vytvářím nový vectorstore v {self.vectorstore_path}")
-            
-            # Vectorstore bude vytvořen později při vkládání dokumentů
-            self.vectorstore = None
     
     def extract_text_from_pdf(self, pdf_path):
         """
@@ -306,49 +289,42 @@ class EmbeddedPipeline:
             return []
         
         # Vyhledání podobných dokumentů
-        docs = self.vectorstore.similarity_search(query, k=limit)
-        return docs
-    
-    def extract_metadata_field(self, text, field):
+        try:
+            docs = self.vectorstore.similarity_search(query, k=limit)
+            return docs
+        except Exception as e:
+             print(f"Chyba při similarity_search: {e}")
+             return []
+
+    # PŘEJMENOVÁNO A UPRAVENO pro tokeny
+    def extract_field_value_with_context(self, context: str, field: str) -> tuple[str, dict]:
         """
-        Extrahuje metadata z textu.
+        Extrahuje hodnotu pole z daného kontextu pomocí LLM.
         
         Args:
-            text (str): Text pro extrakci metadat
-            field (str): Pole metadat k extrakci
+            context (str): Kontext získaný z relevantních chunků.
+            field (str): Název pole metadat.
             
         Returns:
-            str: Extrahovaná hodnota
+            tuple: Extrahovaná hodnota (str) a slovník s tokeny (dict).
         """
-        # Dotaz pro extrakci metadat
         query = self.QUERY_TEMPLATES.get(field, f"Co je {field} této akademické práce?")
-        
-        # Pokud je vectorstore inicializován, použijeme podobnostní vyhledávání
-        if hasattr(self, 'vectorstore') and self.vectorstore is not None:
-            similar_chunks = self.search_similar_chunks(query, limit=5)  # Zvýšení limitu z 2 na 5
-            if similar_chunks:
-                context = "\n\n".join([doc.page_content for doc in similar_chunks])
-            else:
-                # Pokud nejsou žádné podobné chunky, použijeme prvních 4000 znaků textu
-                context = text[:4000]
-        else:
-            # Použití pouze prvních 4000 znaků textu pro každý dotaz
-            context = text[:4000]
-        
         prompt = f"Na základě následujícího textu z akademické práce odpověz na otázku: {query}\n\nText: {context}\n\nOdpověz pouze požadovanou informací bez dalšího vysvětlování."
         
-        # Extrakce metadat pomocí poskytovatele
+        token_usage = {"input_tokens": 0, "output_tokens": 0} # Default
         try:
-            print(f"  Spouštím dotaz pro pole {field}...")
-            result = self.text_provider.generate_text(prompt)
-            return result.strip()
+            print(f"  Spouštím dotaz pro pole '{field}'...")
+            # Získáme text i tokeny
+            value, token_usage = self.text_provider.generate_text(prompt)
+            print(f"  Extrahovaná hodnota pro '{field}': {value[:50]}... Tokeny: {token_usage}")
+            return value.strip(), token_usage
         except Exception as e:
             import traceback
-            print(f"Chyba při extrakci pole {field}: {e}")
-            print(f"Podrobnosti chyby: {traceback.format_exc()}")
-            return ""
-    
-    def extract_metadata(self, pdf_path):
+            print(f"Chyba při extrakci pole '{field}' s LLM: {e}")
+            # print(f"Podrobnosti chyby: {traceback.format_exc()}")
+            return "", token_usage # Vrátit default i při chybě
+
+    def extract_metadata(self, pdf_path) -> tuple[dict, float | None, dict]: # Změna návratového typu
         """
         Extrahuje metadata z PDF souboru.
         
@@ -356,199 +332,229 @@ class EmbeddedPipeline:
             pdf_path (str): Cesta k PDF souboru
             
         Returns:
-            dict: Extrahovaná metadata
+            tuple(dict, float | None, dict): Extrahovaná metadata, doba trvání a celkové token usage
         """
-        # Extrakce textu z PDF
-        text = self.extract_text_from_pdf(pdf_path)
-        
-        if not text:
-            print(f"Nepodařilo se extrahovat text z PDF souboru {pdf_path}")
-            return {}
-        
-        # Reset a vytvoření nového vectorstore pouze pro tento dokument
-        self.vectorstore = None
-        print(f"Vytvářím nový vectorstore pro dokument {pdf_path}")
-        
-        # Vytvoření chunků z dokumentu
+        start_time = time.perf_counter()
         paper_id = os.path.splitext(os.path.basename(pdf_path))[0]
-        metadata = {"source": pdf_path, "paper_id": paper_id}
-        documents = self.create_document_chunks(text, metadata)
-        
-        # Přidání dokumentu do vectorstore
-        print(f"Přidávám {len(documents)} chunků do nového vectorstore")
-        self.add_document_to_vectorstore(documents)
-        
-        # Extrakce metadat
+        print(f"Zpracovávám PDF soubor {pdf_path} (Embedded)...")
+        total_token_usage_doc = {"input_tokens": 0, "output_tokens": 0}
+        doc_vectorstore_path = None
+        doc_vectorstore = None
         metadata_result = {}
-        for field in self.METADATA_FIELDS:
-            print(f"Extrahuji pole {field}...")
-            value = self.extract_metadata_field(text, field)
-            metadata_result[field] = value
-            print(f"Extrahovaná hodnota pro pole {field}: {value[:100]}..." if len(value) > 100 else f"Extrahovaná hodnota pro pole {field}: {value}")
-        
-        return metadata_result
-    
-    def extract_metadata_batch(self, pdf_paths, output_file=None):
+
+        try:
+            # Extrakce textu
+            full_text = self.extract_text_from_pdf(pdf_path)
+            if not full_text:
+                print(f"Nepodařilo se extrahovat text z {pdf_path}")
+                duration = time.perf_counter() - start_time
+                return {}, duration, total_token_usage_doc
+
+            # Vytvoření chunků a vectorstore pro tento dokument
+            doc_metadata = {"source": str(pdf_path)} 
+            documents = self.create_document_chunks(full_text, metadata=doc_metadata)
+            
+            if not documents:
+                 print(f"Nepodařilo se vytvořit chunky pro {pdf_path}")
+                 duration = time.perf_counter() - start_time
+                 return {}, duration, total_token_usage_doc
+
+            # Použijeme unikátní cestu pro každý dokument ve složce běhu
+            run_vectorstore_dir = Path(get_run_results_dir()) / "vectorstore_cache" / f"doc_{paper_id}_{uuid.uuid4().hex[:8]}"
+            doc_vectorstore_path = str(run_vectorstore_dir)
+            run_vectorstore_dir.mkdir(parents=True, exist_ok=True)
+
+            embedding_function = self.embedding_provider.get_embedding_function()
+            print(f"Vytvářím vectorstore pro {paper_id} v {doc_vectorstore_path}...")
+            doc_vectorstore = Chroma.from_documents(
+                documents=documents,
+                embedding=embedding_function,
+                persist_directory=doc_vectorstore_path
+            )
+            print("Vectorstore pro dokument vytvořen.")
+
+            # Extrakce jednotlivých polí s využitím vectorstore
+            for field in self.METADATA_FIELDS:
+                print(f"Extrahuji pole {field}...")
+                query = self.QUERY_TEMPLATES.get(field, f"Jaká je hodnota pole {field}?")
+                try:
+                    # Vyhledání relevantních chunků
+                    similar_chunks = doc_vectorstore.similarity_search(query, k=5)
+                    if not similar_chunks:
+                         print(f"  Nenalezeny žádné podobné chunky pro pole '{field}'.")
+                         metadata_result[field] = ""
+                         continue 
+                         
+                    context = "\n\n".join([chunk.page_content for chunk in similar_chunks])
+                    
+                    # Extrakce hodnoty a tokenů z kontextu
+                    value, field_token_usage = self.extract_field_value_with_context(context, field)
+                    metadata_result[field] = value
+                    
+                    # Agregace tokenů
+                    total_token_usage_doc["input_tokens"] += field_token_usage.get("input_tokens", 0)
+                    total_token_usage_doc["output_tokens"] += field_token_usage.get("output_tokens", 0)
+                    
+                except Exception as e:
+                    print(f"Chyba při hledání nebo extrakci pole {field} pro {pdf_path}: {e}")
+                    metadata_result[field] = ""
+
+            duration = time.perf_counter() - start_time # Měření času - END
+            print(f"Extrakce pro {paper_id} (Embedded) trvala {duration:.2f} sekund.")
+            print(f"Tokeny pro {paper_id} (Embedded): Vstup={total_token_usage_doc['input_tokens']}, Výstup={total_token_usage_doc['output_tokens']}")
+            return metadata_result, duration, total_token_usage_doc # Vrátit i tokeny
+            
+        except Exception as e:
+            import traceback
+            print(f"Obecná chyba při zpracování {pdf_path} v extract_metadata (Embedded): {e}")
+            # print(traceback.format_exc())
+            duration = time.perf_counter() - start_time
+            return {}, duration, total_token_usage_doc # Vrátit prázdná metadata a dobu trvání do chyby
+        finally:
+             # Vyčištění vectorstore, pokud byl vytvořen
+             if doc_vectorstore_path and os.path.exists(doc_vectorstore_path):
+                 try:
+                     print(f"Mažu dočasný vectorstore: {doc_vectorstore_path}")
+                     shutil.rmtree(doc_vectorstore_path)
+                 except Exception as cleanup_e:
+                      print(f"Chyba při mazání vectorstore {doc_vectorstore_path}: {cleanup_e}")
+
+    def extract_metadata_batch(self, pdf_paths, limit=None) -> tuple[dict, dict, dict]: # Změna návratového typu
         """
-        Extrahuje metadata z více PDF souborů.
+        Extrahuje metadata z dávky PDF souborů.
         
         Args:
             pdf_paths (list): Seznam cest k PDF souborům
-            output_file (str, optional): Cesta k výstupnímu souboru
-            
+            limit (int, optional): Omezení počtu zpracovaných souborů
+
         Returns:
-            dict: Extrahovaná metadata pro každý soubor
+            tuple: Slovník s metadaty, slovník s časy, slovník s token usage
         """
-        # Nebudeme inicializovat vectorstore zde - vytvoříme ho pro každý dokument zvlášť
-        
         results = {}
+        timings = {}
+        token_usages = {} # Nový slovník pro tokeny
         
-        for pdf_path in tqdm(pdf_paths, desc="Extrakce metadat"):
-            paper_id = os.path.splitext(os.path.basename(pdf_path))[0]
-            print(f"\nZpracovávám PDF soubor {pdf_path} (ID: {paper_id})...")
+        if limit: pdf_paths = pdf_paths[:limit]
             
+        for pdf_path in tqdm(pdf_paths, desc="Extrakce metadat (Embedded)"):
+            pdf_id = Path(pdf_path).stem
+            duration = None
+            token_usage = {"input_tokens": 0, "output_tokens": 0}
             try:
-                # Reset vectorstore pro každý dokument
-                self.vectorstore = None
-                
-                metadata = self.extract_metadata(pdf_path)
-                results[paper_id] = metadata
-                
-                # Průběžné ukládání výsledků
-                if output_file:
-                    with open(output_file, 'w', encoding='utf-8') as f:
-                        json.dump(results, f, ensure_ascii=False, indent=2)
-                
-                # Po extrakci metadat zrušíme vectorstore, aby se nepoužíval pro další dokumenty
-                self.vectorstore = None
-                
+                metadata_dict, duration, token_usage = self.extract_metadata(pdf_path)
+                results[pdf_id] = metadata_dict
             except Exception as e:
-                print(f"Chyba při zpracování PDF souboru {pdf_path}: {e}")
-                results[paper_id] = {"error": str(e)}
-        
-        return results
+                print(f"Chyba při zpracování souboru {pdf_path}: {e}")
+                results[pdf_id] = None
+            finally:
+                timings[pdf_id] = duration
+                token_usages[pdf_id] = token_usage # Uložit tokeny
+                
+        return results, timings, token_usages # Vrátit i tokeny
 
 
-def extract_metadata_from_pdfs(pdf_dir, output_file, model_name=None, limit=None, provider_name=None, api_key=None, force_extraction=False, embedding_model_name=None, embedding_provider_name=None, vectorstore_path=None):
+def extract_metadata_from_pdfs(pdf_dir, limit=None, provider_name=None, force_extraction=False, embedding_model_name=None, embedding_provider_name=None, model_name=None, vectorstore_path=None, text_api_key=None, embedding_api_key=None) -> tuple[dict, dict, dict]: # Změna návratového typu
     """
-    Hlavní funkce pro extrakci metadat z PDF souborů.
+    Extrahuje metadata z PDF souborů v daném adresáři pomocí Embedded pipeline.
     
     Args:
         pdf_dir (str): Cesta k adresáři s PDF soubory
-        output_file (str): Cesta k výstupnímu souboru
-        model_name (str, optional): Název modelu
-        limit (int, optional): Maximální počet PDF souborů ke zpracování
-        provider_name (str, optional): Název poskytovatele API
-        api_key (str, optional): API klíč
-        force_extraction (bool): Vynutí novou extrakci i když výsledky již existují
+        limit (int, optional): Omezení počtu zpracovaných souborů
+        provider_name (str, optional): Název poskytovatele API pro textový model
+        force_extraction (bool): Vynutí novou extrakci metadat
         embedding_model_name (str, optional): Název modelu pro embeddings
         embedding_provider_name (str, optional): Název poskytovatele API pro embeddings
+        model_name (str, optional): Název textového modelu
         vectorstore_path (str, optional): Cesta k adresáři pro vectorstore
-    """
-    # Načtení konfigurace
-    config = get_config()
-    text_config = config.get_text_config()
-    embedding_config = config.get_embedding_config()
-    
-    # Pokud není explicitně zadán provider, načteme ho z konfigurace
-    if provider_name is None:
-        provider_name = text_config["provider"]
-        print(f"Používám provider z konfigurace: {provider_name}")
-    else:
-        print(f"Používám explicitně zadaný provider: {provider_name}")
+        text_api_key (str, optional): API klíč pro textový model
+        embedding_api_key (str, optional): API klíč pro embedding model
         
-    # Pokud není explicitně zadán model, načteme ho z konfigurace
-    if model_name is None:
-        model_name = text_config["model"]
-        print(f"Používám model z konfigurace: {model_name}")
-    else:
-        print(f"Používám explicitně zadaný model: {model_name}")
+    Returns:
+        tuple: Slovník s metadaty, slovník s časy, slovník s token usage
+    """
+    output_file_path = get_run_results_dir() / "embedded_results.json"
     
-    # Pokud není explicitně zadán embedding provider, načteme ho z konfigurace
-    if embedding_provider_name is None:
-        embedding_provider_name = embedding_config["provider"]
-        print(f"Používám embedding provider z konfigurace: {embedding_provider_name}")
-    else:
-        print(f"Používám explicitně zadaný embedding provider: {embedding_provider_name}")
-    
-    # Pokud není explicitně zadán embedding model, načteme ho z konfigurace
-    if embedding_model_name is None:
-        embedding_model_name = embedding_config["model"]
-        print(f"Používám embedding model z konfigurace: {embedding_model_name}")
-    else:
-        print(f"Používám explicitně zadaný embedding model: {embedding_model_name}")
-    
-    print(f"Inicializuji EmbeddedPipeline s provider={provider_name}, model={model_name}, embedding_provider={embedding_provider_name}, embedding_model={embedding_model_name}")
-    
-    # Vytvoření instance EmbeddedPipeline
+    # Kontrola, zda výsledky již existují
+    if not force_extraction and output_file_path.exists():
+        print(f"Načítám existující výsledky z {output_file_path}...")
+        try:
+            with open(output_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "results" in data and "timings" in data and "token_usages" in data:
+                 print("Nalezena i data o tokenech.")
+                 return data["results"], data["timings"], data["token_usages"]
+            elif isinstance(data, dict) and "results" in data and "timings" in data:
+                 print("VAROVÁNÍ: Data o tokenech nebyla nalezena. Vracím prázdný slovník tokenů.")
+                 return data["results"], data["timings"], {}
+            else:
+                 print("VAROVÁNÍ: Neplatný formát souboru. Spouštím novou extrakci.")
+        except Exception as e:
+            print(f"Chyba při načítání výsledků z {output_file_path}: {e}. Spouštím novou extrakci.")
+
+    # Inicializace pipeline
     pipeline = EmbeddedPipeline(
         model_name=model_name,
         provider_name=provider_name,
-        api_key=api_key,
         embedding_model_name=embedding_model_name,
         embedding_provider_name=embedding_provider_name,
-        vectorstore_path=vectorstore_path
+        vectorstore_path=vectorstore_path, # Předání cesty
+        text_api_key=text_api_key,
+        embedding_api_key=embedding_api_key
     )
     
-    print(f"EmbeddedPipeline inicializován s provider={pipeline.provider_name}, model={pipeline.model_name}, embedding_provider={pipeline.embedding_provider_name}, embedding_model={pipeline.embedding_model_name}")
+    pdf_files = [os.path.join(pdf_dir, f) for f in os.listdir(pdf_dir) if f.endswith('.pdf')]
+    results, timings, token_usages = pipeline.extract_metadata_batch(pdf_files, limit=limit)
     
-    # Získání seznamu PDF souborů
-    pdf_files = list(Path(pdf_dir).glob("*.pdf"))
-    
-    # Omezení počtu souborů ke zpracování
-    if limit:
-        pdf_files = pdf_files[:limit]
-    
-    # Extrakce metadat
-    print(f"\n=== Extrakce metadat pomocí Embedded pipeline ===")
-    
-    # Vždy vytváříme nové výsledky bez ohledu na existenci souborů
-    print(f"Provádím novou extrakci metadat...")
-    results = {}
-    
-    # Extrakce metadat z PDF souborů
-    metadata = pipeline.extract_metadata_batch(pdf_files, output_file)
-    
-    return metadata
+    # Uložení výsledků
+    output_data = {"results": results, "timings": timings, "token_usages": token_usages}
+    try:
+        output_file_path.parent.mkdir(parents=True, exist_ok=True) # Zajistit existenci adresáře
+        with open(output_file_path, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, ensure_ascii=False, indent=2)
+        print(f"Výsledky extrakce (Embedded) včetně tokenů uloženy do {output_file_path}")
+    except Exception as e:
+        print(f"Chyba při ukládání výsledků do {output_file_path}: {e}")
+        
+    return results, timings, token_usages
 
 
-if __name__ == "__main__":
-    # Příklad použití
-    import sys
+if __name__ == '__main__':
     import argparse
     
-    # Vytvoření parseru argumentů
-    parser = argparse.ArgumentParser(description='Extrakce metadat z PDF souborů pomocí Embedded pipeline.')
+    parser = argparse.ArgumentParser(description='Spustí Embedded pipeline pro extrakci metadat z PDF souborů.')
     parser.add_argument('--pdf_dir', type=str, default=str(PDF_DIR), help='Cesta k adresáři s PDF soubory')
-    parser.add_argument('--output_file', type=str, default=str(RESULTS_DIR / "embedded_results.json"), help='Cesta k výstupnímu souboru')
-    parser.add_argument('--model_name', type=str, default=None, help='Název modelu')
     parser.add_argument('--limit', type=int, default=None, help='Omezení počtu zpracovaných souborů')
-    parser.add_argument('--provider', type=str, default=None, help='Název poskytovatele API (openai, anthropic)')
-    parser.add_argument('--config', type=str, default=None, help='Cesta ke konfiguračnímu souboru')
+    parser.add_argument('--provider_name', type=str, default=None, help='Název poskytovatele API pro textový model')
+    parser.add_argument('--model_name', type=str, default=None, help='Název textového modelu')
     parser.add_argument('--embedding_model', type=str, default=None, help='Název embedding modelu')
     parser.add_argument('--embedding_provider', type=str, default=None, help='Název poskytovatele embedding API')
     parser.add_argument('--vectorstore_path', type=str, default=None, help='Cesta k adresáři pro vectorstore')
     parser.add_argument('--force', action='store_true', help='Vynutit novou extrakci i když výsledky již existují')
     
-    # Parsování argumentů
     args = parser.parse_args()
     
-    # Načtení konfigurace, pokud je zadána
-    if args.config:
-        from .config.model_config import load_config
-        load_config(args.config)
+    # <<< Změna: Nastavení výchozího adresáře pro běh, pokud je skript spuštěn samostatně >>>
+    from src.config.runtime_config import set_run_results_dir
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    default_run_dir = Path(__file__).resolve().parent.parent.parent / "results" / f"embedded_standalone_{timestamp}"
+    set_run_results_dir(default_run_dir)
+    # <<< Konec změny >>>
     
-    # Spuštění extrakce metadat
-    results = extract_metadata_from_pdfs(
-        args.pdf_dir, 
-        args.output_file, 
+    # <<< Změna: Načtení obou API klíčů >>>
+    text_api_key_env = os.getenv("ANTHROPIC_API_KEY") if args.provider_name == "anthropic" else os.getenv("OPENAI_API_KEY") if args.provider_name == "openai" else None
+    embedding_api_key_env = os.getenv("ANTHROPIC_API_KEY") if args.embedding_provider == "anthropic" else os.getenv("OPENAI_API_KEY") if args.embedding_provider == "openai" else None
+    # <<< Konec změny >>>
+
+    extract_metadata_from_pdfs(
+        pdf_dir=args.pdf_dir, 
+        limit=args.limit, 
+        provider_name=args.provider_name,
         model_name=args.model_name,
-        limit=args.limit,
-        provider_name=args.provider,
-        force_extraction=args.force,
-        embedding_model_name=args.embedding_model,
         embedding_provider_name=args.embedding_provider,
-        vectorstore_path=args.vectorstore_path
-    )
-    
-    print(f"Extrakce metadat dokončena. Výsledky uloženy do {args.output_file}") 
+        embedding_model_name=args.embedding_model,
+        vectorstore_path=args.vectorstore_path,
+        force_extraction=args.force,
+        text_api_key=text_api_key_env,
+        embedding_api_key=embedding_api_key_env
+    ) 

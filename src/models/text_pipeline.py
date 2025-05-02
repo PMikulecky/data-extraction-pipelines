@@ -8,14 +8,17 @@ Modul pro implementaci textové pipeline pro extrakci metadat z PDF souborů.
 import os
 import re
 import json
-import PyPDF2  # Přidán import PyPDF2
+import PyPDF2
+import time
 from tqdm import tqdm
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-import time # Přidat na začátek souboru
 
-from models.config.model_config import get_config
-from models.providers.factory import ModelProviderFactory
+from src.models.providers.factory import ModelProviderFactory
+from src.models.config.model_config import get_config
+from src.config.runtime_config import get_run_results_dir
+
+from dotenv import load_dotenv
 
 
 class TextPipeline:
@@ -99,7 +102,7 @@ class TextPipeline:
         
         print(f"Inicializován textový model: {self.model_name} od poskytovatele: {self.provider_name}")
     
-    def query_text_model(self, text, query):
+    def query_text_model(self, text, query) -> tuple[str, dict]:
         """
         Dotaz na textový model.
         
@@ -108,9 +111,8 @@ class TextPipeline:
             query (str): Dotaz pro model
             
         Returns:
-            str: Odpověď modelu
+            tuple: Odpověď modelu (str) a slovník s tokeny (dict)
         """
-        # Sestavení promptu pro model
         prompt = f"""Kontext (část akademické práce):
 {text}
 
@@ -119,7 +121,9 @@ Dotaz: {query}
 Odpověď:"""
         
         # Použití poskytovatele pro generování odpovědi
-        return self.text_provider.generate_text(prompt)
+        # Předpokládáme, že provider nyní vrací (text, token_usage)
+        text_result, token_usage = self.text_provider.generate_text(prompt)
+        return text_result, token_usage
     
     def extract_text_from_pdf(self, pdf_path):
         """
@@ -146,7 +150,7 @@ Odpověď:"""
             print(f"Chyba při extrakci textu z PDF souboru {pdf_path}: {e}")
             return ""
     
-    def extract_metadata_from_text_part(self, text, field):
+    def extract_metadata_from_text_part(self, text, field) -> tuple[str, dict]:
         """
         Extrahuje metadata z určité části textu.
         
@@ -155,37 +159,32 @@ Odpověď:"""
             field (str): Pole metadat k extrakci
             
         Returns:
-            str: Extrahovaná hodnota
+            tuple: Extrahovaná hodnota (str) a slovník s tokeny (dict)
         """
         if not text:
-            return ""
+            return "", {"input_tokens": 0, "output_tokens": 0}
         
-        # Získání šablony dotazu pro dané pole
         query = self.QUERY_TEMPLATES.get(field, f"Co je {field} této akademické práce?")
         
-        # Limitování délky textu (pro omezení počtu tokenů)
-        max_text_length = 6000  # přibližně 1500 tokenů
-        if len(text) > max_text_length:
-            # Pro různá pole použijeme různé části textu
-            if field in ['references']:
-                # Pro reference použijeme konec textu
-                text = text[-max_text_length:]
-            elif field in ['abstract', 'keywords']:
-                # Pro abstrakt a klíčová slova použijeme začátek textu
-                text = text[:max_text_length]
-            else:
-                # Pro ostatní metadata použijeme začátek textu
-                text = text[:max_text_length]
+        # Limitování délky textu (může ovlivnit počet input tokenů)
+        max_text_length = 6000
+        original_len = len(text)
+        if original_len > max_text_length:
+            if field in ['references']: text = text[-max_text_length:]
+            elif field in ['abstract', 'keywords']: text = text[:max_text_length]
+            else: text = text[:max_text_length]
+            print(f"  (Text pro pole '{field}' zkrácen z {original_len} na {len(text)} znaků)")
         
+        token_usage = {"input_tokens": 0, "output_tokens": 0} # Default
         try:
-            # Dotaz na model
-            result = self.query_text_model(text, query)
-            return result.strip() if result else ""
+            # Dotaz na model, získáme i tokeny
+            result, token_usage = self.query_text_model(text, query)
+            return result.strip() if result else "", token_usage
         except Exception as e:
             print(f"Chyba při extrakci pole {field} z textu: {e}")
-            return ""
+            return "", token_usage # Vrátit default i při chybě
     
-    def extract_metadata(self, pdf_path):
+    def extract_metadata(self, pdf_path) -> tuple[dict, float | None, dict]:
         """
         Extrahuje metadata z PDF souboru.
         
@@ -193,45 +192,45 @@ Odpověď:"""
             pdf_path (str): Cesta k PDF souboru
             
         Returns:
-            tuple(dict, float | None): Extrahovaná metadata a doba trvání extrakce v sekundách (nebo None při chybě)
+            tuple(dict, float | None, dict): Extrahovaná metadata, doba trvání a celkové token usage
         """
-        start_time = time.perf_counter() # Měření času - START
+        start_time = time.perf_counter()
         paper_id = os.path.splitext(os.path.basename(pdf_path))[0]
         print(f"Zpracovávám PDF soubor {pdf_path} (Text)...")
+        total_token_usage_doc = {"input_tokens": 0, "output_tokens": 0}
 
         try:
-            # Extrahujeme text z PDF pomocí naší nové metody
             full_text = self.extract_text_from_pdf(pdf_path)
-
             if not full_text:
                 print(f"Nepodařilo se extrahovat text z PDF souboru {pdf_path}")
-                duration = time.perf_counter() - start_time # Měření času - END (i při chybě)
-                return {}, duration # Vrátit délku trvání i při chybě
+                duration = time.perf_counter() - start_time
+                return {}, duration, total_token_usage_doc
 
-            # Extrakce metadat
             metadata = {}
             for field in self.METADATA_FIELDS:
                 print(f"Extrahuji pole {field}...")
                 try:
-                    # Extrakce hodnoty z celého textu
-                    metadata[field] = self.extract_metadata_from_text_part(full_text, field)
+                    # Extrakce hodnoty i tokenů
+                    field_value, field_token_usage = self.extract_metadata_from_text_part(full_text, field)
+                    metadata[field] = field_value
+                    # Agregace tokenů
+                    total_token_usage_doc["input_tokens"] += field_token_usage.get("input_tokens", 0)
+                    total_token_usage_doc["output_tokens"] += field_token_usage.get("output_tokens", 0)
                 except Exception as e:
                     print(f"Chyba při extrakci pole {field} pro {pdf_path}: {e}")
-                    metadata[field] = "" # Nebo jiná chybová hodnota
+                    metadata[field] = ""
 
-            # Zkusíme vylepšit metadata přímými nálezy
             enhanced_metadata = self.enhance_metadata_with_direct_matches(metadata, full_text)
-
-            duration = time.perf_counter() - start_time # Měření času - END
+            duration = time.perf_counter() - start_time
             print(f"Extrakce pro {paper_id} (Text) trvala {duration:.2f} sekund.")
-            return enhanced_metadata, duration
+            print(f"Tokeny pro {paper_id} (Text): Vstup={total_token_usage_doc['input_tokens']}, Výstup={total_token_usage_doc['output_tokens']}")
+            return enhanced_metadata, duration, total_token_usage_doc # Vrátit i tokeny
         except Exception as e:
-             # Zachycení obecné chyby během zpracování
              print(f"Obecná chyba při zpracování PDF {pdf_path} v extract_metadata (Text): {e}")
              duration = time.perf_counter() - start_time
-             return {}, duration # Vrátit délku trvání i při chybě
+             return {}, duration, total_token_usage_doc # Vrátit i tokeny
     
-    def extract_metadata_batch(self, pdf_paths, output_file=None):
+    def extract_metadata_batch(self, pdf_paths, output_file=None) -> tuple[dict, dict, dict]:
         """
         Extrahuje metadata z více PDF souborů.
         
@@ -240,35 +239,88 @@ Odpověď:"""
             output_file (str, optional): Cesta k výstupnímu souboru pro průběžné ukládání
             
         Returns:
-            tuple(dict, dict): Slovník s extrahovanými metadaty a slovník s časy extrakce
+            tuple(dict, dict, dict): Slovník metadat, slovník časů, slovník tokenů
         """
         results = {}
-        extraction_times = {} # Nový slovník pro časy
-
-        for pdf_path in tqdm(pdf_paths, desc="Extrakce metadat (Text)"):
-            paper_id = os.path.splitext(os.path.basename(pdf_path))[0]
-            # print(f"\nZpracovávám PDF soubor {pdf_path} (ID: {paper_id})...") # Odstraněno, tqdm stačí
-
+        extraction_times = {} 
+        token_usages = {} # Nový slovník pro tokeny
+        
+        pdf_files_to_process = pdf_paths # Předejeme celý seznam, pokud není output_file
+        
+        # Pokud máme output_file, můžeme načíst již zpracované
+        if output_file and Path(output_file).exists():
             try:
-                 # Volání upravené metody extract_metadata
-                metadata, duration = self.extract_metadata(pdf_path)
-                results[paper_id] = metadata
-                # Uložení času (i pokud je None nebo při chybě)
-                extraction_times[paper_id] = duration
-
-                # Průběžné ukládání výsledků (pouze metadata)
-                if output_file:
-                    # Ošetření None hodnot před uložením do JSON
-                    save_data = {k: (v if v is not None else {"error": "Extraction failed"}) for k, v in results.items()}
-                    with open(output_file, 'w', encoding='utf-8') as f:
-                        json.dump(save_data, f, ensure_ascii=False, indent=2)
+                 with open(output_file, 'r', encoding='utf-8') as f:
+                    existing_results = json.load(f)
+                 print(f"Nalezeno {len(existing_results)} existujících výsledků v {output_file}")
+                 # Načteme i časy a tokeny, pokud existují
+                 timing_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_timing.json"
+                 token_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_tokens.json"
+                 if timing_file.exists():
+                     with open(timing_file, 'r', encoding='utf-8') as f:
+                         extraction_times = json.load(f)
+                 if token_file.exists():
+                     with open(token_file, 'r', encoding='utf-8') as f:
+                         token_usages = json.load(f)
+                 
+                 # Odfiltrujeme již zpracované soubory
+                 processed_ids = set(existing_results.keys())
+                 pdf_files_to_process = [p for p in pdf_paths if Path(p).stem not in processed_ids]
+                 results.update(existing_results) # Přidáme existující
+                 print(f"Zbývá zpracovat {len(pdf_files_to_process)} souborů.")
             except Exception as e:
-                 # Tato chyba by neměla nastat, pokud extract_metadata správně vrací duration
-                print(f"Neočekávaná chyba při zpracování PDF souboru {pdf_path} v extract_metadata_batch (Text): {e}")
-                results[paper_id] = {"error": str(e)}
-                extraction_times[paper_id] = None # Explicitně None pro neočekávanou chybu
+                 print(f"Chyba při načítání existujících výsledků z {output_file}: {e}. Zpracuji vše znovu.")
+                 pdf_files_to_process = pdf_paths
+                 results = {}
+                 extraction_times = {}
+                 token_usages = {}
 
-        return results, extraction_times
+        if not pdf_files_to_process:
+             print("Žádné nové soubory ke zpracování.")
+             return results, extraction_times, token_usages
+
+        # Zpracování zbývajících souborů
+        for pdf_path in tqdm(pdf_files_to_process, desc="Extrakce metadat (Text)"):
+            pdf_id = Path(pdf_path).stem
+            duration = None
+            token_usage = {"input_tokens": 0, "output_tokens": 0}
+            try:
+                metadata_dict, duration, token_usage = self.extract_metadata(pdf_path)
+                results[pdf_id] = metadata_dict
+            except Exception as e:
+                print(f"Chyba při zpracování souboru {pdf_path}: {e}")
+                results[pdf_id] = None
+            finally:
+                extraction_times[pdf_id] = duration
+                token_usages[pdf_id] = token_usage # Uložit tokeny
+                
+                # Průběžné ukládání (pokud je zadán output_file)
+                if output_file:
+                    # Uložíme metadata
+                    try:
+                        save_results = {k: (v if v is not None else {"error": "Extraction failed"}) for k, v in results.items()}
+                        with open(output_file, 'w', encoding='utf-8') as f:
+                            json.dump(save_results, f, ensure_ascii=False, indent=2)
+                    except Exception as save_e:
+                         print(f"Chyba při průběžném ukládání výsledků: {save_e}")
+                    # Uložíme časy
+                    try:
+                        timing_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_timing.json"
+                        save_timings = {k: (v if v is not None else -1.0) for k, v in extraction_times.items()}
+                        with open(timing_file, 'w', encoding='utf-8') as f:
+                             json.dump(save_timings, f, ensure_ascii=False, indent=2)
+                    except Exception as save_t_e:
+                         print(f"Chyba při průběžném ukládání časů: {save_t_e}")
+                    # Uložíme tokeny
+                    try:
+                        token_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_tokens.json"
+                        save_tokens = {k: (v if v is not None else {"input_tokens": 0, "output_tokens": 0}) for k, v in token_usages.items()}
+                        with open(token_file, 'w', encoding='utf-8') as f:
+                             json.dump(save_tokens, f, ensure_ascii=False, indent=2)
+                    except Exception as save_tok_e:
+                         print(f"Chyba při průběžném ukládání tokenů: {save_tok_e}")
+                        
+        return results, extraction_times, token_usages # Vrátit i tokeny
     
     def extract_direct_matches(self, text):
         """
@@ -325,58 +377,71 @@ Odpověď:"""
         return enhanced_metadata
 
 
-def extract_metadata_from_pdfs(pdf_dir, output_file=None, limit=None, force_extraction=False, provider_name=None, model_name=None, api_key=None):
+def extract_metadata_from_pdfs(pdf_dir, output_file=None, limit=None, force_extraction=False, provider_name=None, model_name=None, api_key=None) -> tuple[dict, dict, dict]:
     """
     Hlavní funkce pro spuštění textové pipeline pro extrakci metadat.
+    Vrací (results, timings, token_usages).
     """
-    # Zkontroluje, zda výsledky už existují
-    if output_file and os.path.exists(output_file) and not force_extraction:
-        print(f"Výsledky již existují v {output_file}. Přeskakuji extrakci.")
-        try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                results = json.load(f)
-        except json.JSONDecodeError:
-             print(f"VAROVÁNÍ: Soubor {output_file} je poškozený. Vynucuji novou extrakci.")
-             results = None
-             force_extraction = True # Vynutit novou extrakci
+    results = None
+    timings = {}
+    token_usages = {} # Inicializace
+    output_file_path = None
+    timing_output_file = None
+    token_output_file = None # Cesta pro tokeny
 
-        if not force_extraction:
-            # Pokusíme se načíst i časy (pokud existují)
-            timing_output_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_timing.json"
-            if timing_output_file.exists():
-                print(f"Načítám existující časy z {timing_output_file}")
-            return results # Vrátí pouze metadata
-
-    # Získání seznamu PDF souborů
-    pdf_files = [os.path.join(pdf_dir, f) for f in os.listdir(pdf_dir) if f.endswith('.pdf')]
-    if limit:
-        pdf_files = pdf_files[:limit]
-
-    if not pdf_files:
-        print("Nebyly nalezeny žádné PDF soubory pro zpracování.")
-        return {}
-
-    # Inicializace pipeline
-    pipeline = TextPipeline(provider_name=provider_name, model_name=model_name, api_key=api_key)
-
-    # Extrakce metadat
-    results, timings = pipeline.extract_metadata_batch(pdf_files, output_file) # Získání metadat i časů
-
-    # Uložení výsledků (metadata)
+    # Nastavení cest, pokud je zadán output_file
     if output_file:
-        # Ošetření None hodnot před uložením do JSON
-        save_results = {k: (v if v is not None else {"error": "Extraction failed"}) for k, v in results.items()}
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(save_results, f, ensure_ascii=False, indent=2)
-        print(f"Výsledky extrakce (metadata) uloženy do {output_file}")
+        output_file_path = Path(output_file)
+        try:
+            timing_output_file = output_file_path.parent / f"{output_file_path.stem.replace('_results', '')}_timing.json"
+            token_output_file = output_file_path.parent / f"{output_file_path.stem.replace('_results', '')}_tokens.json"
+        except Exception as e:
+            print(f"Chyba při vytváření cest k souborům z {output_file}: {e}")
+            # Nemůžeme pokračovat bez platných cest, pokud byl zadán output_file
+            return {}, {}, {}
+    else: 
+        # Pokud není zadán output_file, použijeme runtime config
+        run_dir = get_run_results_dir()
+        output_file_path = run_dir / "text_results.json"
+        timing_output_file = run_dir / "text_timing.json"
+        token_output_file = run_dir / "text_tokens.json"
 
-    # Uložení časů do samostatného souboru
-    if output_file: # Uložíme časy jen pokud ukládáme i výsledky
-        # Ošetření None hodnot pro časy
-        save_timings = {k: (v if v is not None else -1.0) for k, v in timings.items()} # -1 jako indikátor chyby
-        timing_output_file = Path(output_file).parent / f"{Path(output_file).stem.replace('_results', '')}_timing.json"
-        with open(timing_output_file, 'w', encoding='utf-8') as f:
-            json.dump(save_timings, f, ensure_ascii=False, indent=2)
-        print(f"Výsledky extrakce (časy) uloženy do {timing_output_file}")
 
-    return results # Vrátí pouze metadata 
+    # Zkontroluje, zda výsledky už existují
+    if output_file_path.exists() and not force_extraction:
+        print(f"Výsledky již existují v {output_file_path}. Přeskakuji extrakci.")
+        try:
+            with open(output_file_path, 'r', encoding='utf-8') as f:
+                results = json.load(f)
+            # Pokusíme se načíst i časy a tokeny
+            if timing_output_file and timing_output_file.exists():
+                 with open(timing_output_file, 'r', encoding='utf-8') as f: timings = json.load(f)
+            if token_output_file and token_output_file.exists():
+                 with open(token_output_file, 'r', encoding='utf-8') as f: token_usages = json.load(f)
+        except Exception as e:
+             print(f"Chyba při načítání existujících souborů: {e}. Vynucuji novou extrakci.")
+             results = None; timings = {}; token_usages = {}
+
+        if results is not None:
+            return results, timings, token_usages
+
+    # --- Sekce pro spuštění extrakce ---
+    print("Spouštím extrakci (Text)...")
+    pdf_files = [os.path.join(pdf_dir, f) for f in os.listdir(pdf_dir) if f.endswith('.pdf')]
+    if limit: pdf_files = pdf_files[:limit]
+    if not pdf_files: print("Nebyly nalezeny žádné PDF soubory."); return {}, {}, {}
+
+    pipeline = TextPipeline(provider_name=provider_name, model_name=model_name, api_key=api_key)
+    try:
+        # Zavoláme batch s předáním output_file_path pro průběžné ukládání
+        results, timings, token_usages = pipeline.extract_metadata_batch(pdf_files, output_file=output_file_path)
+    except Exception as batch_e:
+        print(f"Chyba během dávkové extrakce (Text): {batch_e}")
+        return {}, {}, {}
+
+    # Finální uložení není potřeba, protože batch ukládá průběžně
+    print(f"Extrakce (Text) dokončena. Výsledky jsou v {output_file_path}")
+    
+    return results, timings, token_usages # Vrátí metadata, časy i tokeny
+
+# ... (if __name__ == '__main__': block) ... 

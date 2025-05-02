@@ -25,6 +25,7 @@ Projekt zahrnuje následující komponenty:
 4. **Porovnání výsledků**:
    - Textové porovnání s referenčními daty
    - Výpočet skóre podobnosti pro každý typ metadat
+   - **Poznámka:** Pole, u kterých chybí referenční hodnota (např. `NaN`), jsou nyní ignorována při výpočtu celkové podobnosti (`overall_similarity`) pro daný dokument. Tím se zabrání zkreslení skóre nulovými hodnotami. Pokud dokument nemá žádná porovnatelná pole, jeho `overall_similarity` bude `None`.
 
 5. **Sémantické porovnání** (nová komponenta):
    - Normalizace extrahovaných a referenčních dat
@@ -228,23 +229,34 @@ metadata-extraction-ai/
 
 ## Výstupy
 
-Aplikace generuje následující výstupy v adresáři `results/`:
+Aplikace generuje výstupy v adresáři `results/`. Každý běh hlavního skriptu (`main.py`, `run_all_models.py`, `run_semantic_comparison.py`) vytvoří vlastní podadresář pojmenovaný podle typu běhu a časového razítka (např. `results/main_20231027_103000/` nebo `results/all_models_20231027_110000/`).
 
-1. **JSON soubory s výsledky**:
-   - `[model]_results.json`: Extrahovaná metadata pro daný model (např. `embedded_results.json`).
-   - `[model]_comparison.json`: Výsledky porovnání s referencemi pro daný model.
-   - `[model]_comparison_semantic.json`: Výsledky po sémantickém porovnání (pokud bylo spuštěno).
-   - `semantic_comparison_results.json`: Souhrnné výsledky sémantického porovnání (pokud bylo spuštěno samostatně).
+**Struktura pro `main.py` nebo `run_semantic_comparison.py` (např. `results/main_YYYYMMDD_HHMMSS/`):**
 
-2. **Vizualizace**:
-   - `comparison_results.png`: Sloupcový graf porovnání úspěšnosti modelů pro jednotlivá pole metadat. **Nově obsahuje chybové úsečky (±1σ)**.
-   - `overall_results.png`: Sloupcový graf celkové úspěšnosti modelů. **Nově obsahuje chybové úsečky (±1σ)**.
-   - **`comparison_results_boxplot.png`**: **Nový box plot** zobrazující distribuci skóre podobnosti pro jednotlivá pole a modely.
-   - **`overall_results_boxplot.png`**: **Nový box plot** zobrazující distribuci celkového skóre podobnosti pro jednotlivé modely.
+1.  **JSON soubory s výsledky**:
+    *   `[model]_results.json`: Extrahovaná metadata a časy zpracování pro daný model (např. `embedded_results.json`). Obsahuje klíče `"results"` a `"timings"`.
+    *   `[model]_comparison.json`: Výsledky základního porovnání s referencemi pro daný model.
+    *   `[model]_comparison_semantic.json`: Výsledky po sémantickém porovnání (pokud bylo spuštěno).
+    *   `semantic_comparison_summary.json`: Souhrnné výsledky sémantického porovnání (pokud bylo spuštěno pomocí `run_semantic_comparison.py`, obsahuje aktualizovaná data pro všechny zpracované modely).
 
-3. **CSV tabulky**:
-   - `summary_results.csv`: Souhrnné statistiky (průměr, směrodatná odchylka) pro každé pole a model.
-   - `overall_summary_results.csv`: Celkové souhrnné statistiky (průměr, směrodatná odchylka) pro každý model.
-   - `detailed_scores_all.csv`: Detailní skóre podobnosti pro každý dokument, pole a model, použité pro generování box plotů a výpočet statistik.
-   - `detailed_results.csv`: *Původní* detailní výsledky (může mít jinou strukturu).
-   - `overall_results.csv`: *Původní* celkové výsledky (může mít jinou strukturu). 
+2.  **Vizualizace**:
+    *   `comparison_results.png`: Sloupcový graf porovnání úspěšnosti modelů pro jednotlivá pole metadat (s chybovými úsečkami ±1σ).
+    *   `overall_results.png`: Sloupcový graf celkové úspěšnosti modelů (s chybovými úsečkami ±1σ).
+    *   `comparison_results_boxplot.png`: Box plot zobrazující distribuci skóre podobnosti pro jednotlivá pole a modely.
+    *   `overall_results_boxplot.png`: Box plot zobrazující distribuci celkového skóre podobnosti pro jednotlivé modely.
+
+3.  **CSV tabulky**:
+    *   `summary_results.csv`: Souhrnné statistiky (průměr, směrodatná odchylka) pro každé pole a model.
+    *   `overall_summary_results.csv`: Celkové souhrnné statistiky (průměr, směrodatná odchylka, průměrný čas) pro každý model.
+    *   `detailed_scores_all.csv`: Detailní skóre podobnosti a časy pro každý dokument, pole a model.
+
+**Struktura pro `run_all_models.py` (např. `results/all_models_YYYYMMDD_HHMMSS/`):**
+
+*   **Podadresáře pro jednotlivé konfigurace**: Každá testovaná konfigurace modelu bude mít vlastní podadresář (např. `konfigurace-1_20231027_110010/`) se strukturou výstupů stejnou jako pro `main.py` (viz výše).
+*   **Adresář `final_comparison/`**: Obsahuje souhrnné výsledky porovnávající *všechny* konfigurace spuštěné v rámci tohoto běhu `run_all_models.py`.
+    *   `[field]_comparison.png`: Graf porovnání průměrné úspěšnosti pro dané pole napříč všemi konfiguracemi.
+    *   `[field]_comparison.csv`: CSV s daty pro graf porovnání pole.
+    *   `overall_comparison.png`: Graf porovnání celkové průměrné úspěšnosti napříč všemi konfiguracemi.
+    *   `overall_comparison.csv`: CSV s daty pro graf celkového porovnání.
+    *   `final_summary_all_fields.csv`: Spojená data ze `summary_results.csv` všech konfigurací.
+    *   `final_overall_all_models.csv`: Spojená data ze `overall_summary_results.csv` všech konfigurací. 

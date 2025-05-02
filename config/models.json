@@ -82,5 +82,47 @@
       "extract_references": true,
       "use_direct_pattern_extraction": true
     }
+  },
+  {
+    "name": "gemma3:4b_granite3.2-2b_nomic-embed-large-335m",
+    "text": {
+      "provider": "ollama",
+      "model": "gemma3:4b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "granite3.2-vision:2b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "nomic-embed-text:latest"
+    },
+    "text_pipeline": {
+      "enabled": true,
+      "max_text_length": 6000,
+      "extract_references": true,
+      "use_direct_pattern_extraction": true
+    }
+  },
+  {
+    "name": "qwen2.5:7b_minicpm-v:8b_mxbai-embed-large-335m",
+    "text": {
+      "provider": "ollama",
+      "model": "qwen2.5:7b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "minicpm-v:8b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "mxbai-embed-large:335m"
+    },
+    "text_pipeline": {
+      "enabled": true,
+      "max_text_length": 6000,
+      "extract_references": true,
+      "use_direct_pattern_extraction": true
+    }
   }
 ] 

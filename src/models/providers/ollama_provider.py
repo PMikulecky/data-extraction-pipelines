@@ -73,7 +73,7 @@ class OllamaTextModelProvider(TextModelProvider):
         except Exception as e:
             print(f"Výjimka při získávání seznamu modelů z Ollama API: {e}")
     
-    def generate_text(self, prompt: str, **kwargs) -> str:
+    def generate_text(self, prompt: str, **kwargs) -> tuple[str, dict]:
         """
         Generuje text na základě promptu pomocí Ollama API.
         
@@ -82,46 +82,40 @@ class OllamaTextModelProvider(TextModelProvider):
             **kwargs: Další parametry pro generování textu
             
         Returns:
-            Vygenerovaný text
+            tuple: Vygenerovaný text a slovník s počty tokenů ({'input_tokens': 0, 'output_tokens': 0} - Ollama API je nevrací standardně)
         """
-        # Příprava dotazu pro API
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
+        headers = {"Content-Type": "application/json"}
         temperature = kwargs.get("temperature", 0.0)
-        
         payload = {
             "model": self.model_name,
             "prompt": prompt,
             "temperature": temperature,
             "stream": False
         }
-        
-        # Pokud jsou definované další parametry, přidáme je
         for param in ['num_predict', 'top_k', 'top_p', 'repeat_penalty', 'presence_penalty', 'frequency_penalty', 'stop']:
             if param in kwargs:
                 payload[param] = kwargs[param]
         
-        # Odeslání dotazu
+        # Default token usage for Ollama
+        token_usage = {"input_tokens": 0, "output_tokens": 0}
+        
         try:
-            response = requests.post(
-                f"{self.api_base}/generate",
-                headers=headers,
-                json=payload,
-                timeout=500  # Timeout nastaven na 500 sekund
-            )
+            response = requests.post(f"{self.api_base}/generate", headers=headers, json=payload, timeout=500)
             
-            # Zpracování odpovědi
             if response.status_code == 200:
-                return response.json()["response"]
+                # Zkusíme získat tokeny, pokud jsou v odpovědi (některé verze/modely je mohou vracet)
+                response_data = response.json()
+                text_content = response_data.get("response", "")
+                token_usage["input_tokens"] = response_data.get("prompt_eval_count", 0)
+                token_usage["output_tokens"] = response_data.get("eval_count", 0)
+                return text_content, token_usage
             else:
                 error_msg = f"Chyba při dotazu na Ollama API: {response.status_code} - {response.text}"
                 print(error_msg)
-                raise Exception(error_msg)
+                return "", token_usage # Vrátit default při chybě
         except requests.exceptions.RequestException as e:
             print(f"Síťová chyba při dotazu na Ollama API: {e}")
-            raise Exception(f"Síťová chyba při dotazu na Ollama API: {e}")
+            return "", token_usage # Vrátit default při chybě
     
     def get_available_models(self) -> List[str]:
         """
@@ -223,7 +217,7 @@ class OllamaVisionModelProvider(VisionModelProvider):
         image.save(buffered, format="JPEG")
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
     
-    def generate_text_from_image(self, image: Image.Image, prompt: str, **kwargs) -> str:
+    def generate_text_from_image(self, image: Image.Image, prompt: str, **kwargs) -> tuple[str, dict]:
         """
         Generuje text na základě obrázku a promptu pomocí Ollama API.
         
@@ -233,50 +227,42 @@ class OllamaVisionModelProvider(VisionModelProvider):
             **kwargs: Další parametry pro generování textu
             
         Returns:
-            Vygenerovaný text
+            tuple: Vygenerovaný text a slovník s počty tokenů ({'input_tokens': 0, 'output_tokens': 0} - Ollama API je nevrací standardně)
         """
-        # Zakódování obrázku do base64
         base64_image = self.encode_image(image)
-        
-        # Příprava dotazu pro API
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
+        headers = {"Content-Type": "application/json"}
         temperature = kwargs.get("temperature", 0.0)
-        
         payload = {
             "model": self.model_name,
             "prompt": prompt,
-            "images": [base64_image],
             "temperature": temperature,
+            "images": [base64_image],
             "stream": False
         }
-        
-        # Přidání dalších parametrů, pokud jsou zadány
         for param in ['num_predict', 'top_k', 'top_p', 'repeat_penalty', 'presence_penalty', 'frequency_penalty', 'stop']:
             if param in kwargs:
                 payload[param] = kwargs[param]
+                
+        # Default token usage for Ollama
+        token_usage = {"input_tokens": 0, "output_tokens": 0}
         
-        # Odeslání dotazu
         try:
-            response = requests.post(
-                f"{self.api_base}/generate",
-                headers=headers,
-                json=payload,
-                timeout=500  # Delší timeout pro práci s obrázky
-            )
+            response = requests.post(f"{self.api_base}/generate", headers=headers, json=payload, timeout=500)
             
-            # Zpracování odpovědi
             if response.status_code == 200:
-                return response.json()["response"]
+                 # Zkusíme získat tokeny, pokud jsou v odpovědi
+                response_data = response.json()
+                text_content = response_data.get("response", "")
+                token_usage["input_tokens"] = response_data.get("prompt_eval_count", 0)
+                token_usage["output_tokens"] = response_data.get("eval_count", 0)
+                return text_content, token_usage
             else:
-                error_msg = f"Chyba při dotazu na Ollama API s obrázkem: {response.status_code} - {response.text}"
+                error_msg = f"Chyba při dotazu na Ollama Vision API: {response.status_code} - {response.text}"
                 print(error_msg)
-                raise Exception(error_msg)
+                return "", token_usage # Vrátit default při chybě
         except requests.exceptions.RequestException as e:
-            print(f"Síťová chyba při dotazu na Ollama API s obrázkem: {e}")
-            raise Exception(f"Síťová chyba při dotazu na Ollama API s obrázkem: {e}")
+            print(f"Síťová chyba při dotazu na Ollama Vision API: {e}")
+            return "", token_usage # Vrátit default při chybě
     
     def get_available_models(self) -> List[str]:
         """

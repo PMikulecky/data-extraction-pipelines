@@ -13,6 +13,7 @@ import requests
 from typing import Dict, List, Any, Optional
 from PIL import Image
 import re
+import time
 
 from ..base.provider import TextModelProvider, VisionModelProvider
 
@@ -30,6 +31,10 @@ class AnthropicTextModelProvider(TextModelProvider):
         "claude-2.1"
     ]
     
+    # Limity tokenů pro čekání (mírně pod skutečnými limity)
+    INPUT_TOKEN_THRESHOLD = 40000
+    OUTPUT_TOKEN_THRESHOLD = 8000
+    
     def __init__(self, model_name: str = "claude-3-haiku-20240307"):
         """
         Inicializace poskytovatele Anthropic.
@@ -40,6 +45,10 @@ class AnthropicTextModelProvider(TextModelProvider):
         self.model_name = model_name
         self.api_key = None
         self.api_base = "https://api.anthropic.com/v1"
+        # Kumulativní počty tokenů pro sledování limitu
+        self.cumulative_input_tokens = 0
+        self.cumulative_output_tokens = 0
+        self.last_reset_time = time.time()
     
     def initialize(self, api_key: Optional[str] = None, **kwargs) -> None:
         """
@@ -65,7 +74,27 @@ class AnthropicTextModelProvider(TextModelProvider):
         if "model_name" in kwargs:
             self.model_name = kwargs["model_name"]
     
-    def generate_text(self, prompt: str, **kwargs) -> str:
+    def _check_and_wait_for_rate_limit(self):
+        """Zkontroluje kumulativní tokeny a počká, pokud je dosaženo prahu."""
+        # Zjednodušený reset - pokud uplynula více než minuta od posledního resetu, vynulujeme
+        # To nemusí být přesné, ale je to jednoduchá aproximace minutového okna Anthropicu
+        if time.time() - self.last_reset_time > 60:
+             print("Uplynula minuta od posledního resetu/čekání, resetuji kumulativní tokeny.")
+             self.cumulative_input_tokens = 0
+             self.cumulative_output_tokens = 0
+             self.last_reset_time = time.time()
+
+        if self.cumulative_input_tokens >= self.INPUT_TOKEN_THRESHOLD or \
+           self.cumulative_output_tokens >= self.OUTPUT_TOKEN_THRESHOLD:
+            print(f"WARN: Dosažen práh tokenů (In: {self.cumulative_input_tokens}/{self.INPUT_TOKEN_THRESHOLD}, Out: {self.cumulative_output_tokens}/{self.OUTPUT_TOKEN_THRESHOLD}). Čekám 60 sekund...")
+            time.sleep(60)
+            print("Pokračuji po čekání...")
+            # Po čekání resetujeme čítače a čas
+            self.cumulative_input_tokens = 0
+            self.cumulative_output_tokens = 0
+            self.last_reset_time = time.time()
+
+    def generate_text(self, prompt: str, **kwargs) -> tuple[str, dict]:
         """
         Generuje text na základě promptu pomocí Anthropic API.
         
@@ -74,45 +103,44 @@ class AnthropicTextModelProvider(TextModelProvider):
             **kwargs: Další parametry pro generování textu
             
         Returns:
-            Vygenerovaný text
+            tuple: Vygenerovaný text a slovník s počty tokenů ({'input_tokens': N, 'output_tokens': M})
         """
-        # Příprava dotazu pro API
+        # Kontrola limitu PŘED voláním API
+        self._check_and_wait_for_rate_limit()
+
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01"
         }
-        
         temperature = kwargs.get("temperature", 0.0)
         max_tokens = kwargs.get("max_tokens", 1000)
-        
         payload = {
             "model": self.model_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
+            "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature,
             "max_tokens": max_tokens
         }
-        
-        # Odeslání dotazu
+        token_usage = {"input_tokens": 0, "output_tokens": 0} # Default
         try:
             print(f"Odesílám požadavek na Anthropic API (model: {self.model_name})")
-            print(f"API klíč začíná: {self.api_key[:10]}..., délka: {len(self.api_key)}")
+            # print(f"API klíč začíná: {self.api_key[:10]}..., délka: {len(self.api_key)}")
+            response = requests.post(f"{self.api_base}/messages", headers=headers, json=payload, timeout=30)
             
-            response = requests.post(
-                f"{self.api_base}/messages",
-                headers=headers,
-                json=payload,
-                timeout=30  # Přidání timeoutu pro prevenci nekonečného čekání
-            )
-            
-            # Zpracování odpovědi
             if response.status_code == 200:
-                return response.json()["content"][0]["text"]
+                response_data = response.json()
+                text_content = response_data["content"][0]["text"]
+                # Extrahovat token usage, pokud existuje
+                if "usage" in response_data:
+                    usage_data = response_data["usage"]
+                    token_usage["input_tokens"] = usage_data.get("input_tokens", 0)
+                    token_usage["output_tokens"] = usage_data.get("output_tokens", 0)
+                    # Aktualizace kumulativních tokenů PO úspěšném volání
+                    self.cumulative_input_tokens += token_usage["input_tokens"]
+                    self.cumulative_output_tokens += token_usage["output_tokens"]
+                    print(f"  Anthropic Tokens Used (request): In={token_usage['input_tokens']}, Out={token_usage['output_tokens']}")
+                    print(f"  Anthropic Tokens Cumulative (since last wait/reset): In={self.cumulative_input_tokens}, Out={self.cumulative_output_tokens}")
+                return text_content, token_usage
             else:
                 try:
                     error_data = response.json()
@@ -120,16 +148,15 @@ class AnthropicTextModelProvider(TextModelProvider):
                     error_message = error_data.get('error', {}).get('message', 'No message')
                     error_msg = f"Chyba při dotazu na Anthropic API: {response.status_code} - {response.text}"
                     print(f"Detaily chyby: typ={error_type}, zpráva={error_message}")
-                    print(f"Použitá URL: {self.api_base}/messages")
-                    print(f"Použité hlavičky: {headers}")
-                    raise Exception(error_msg)
+                    # print(f"Použitá URL: {self.api_base}/messages")
+                    # print(f"Použité hlavičky: {headers}")
                 except Exception as e:
                     error_msg = f"Chyba při dotazu na Anthropic API: {response.status_code} - {response.text}"
                     print(error_msg)
-                    raise Exception(error_msg)
+                return "", token_usage # Vrátit prázdný string a nulové tokeny při chybě
         except requests.exceptions.RequestException as e:
             print(f"Síťová chyba při dotazu na Anthropic API: {e}")
-            raise Exception(f"Síťová chyba při dotazu na Anthropic API: {e}")
+            return "", token_usage # Vrátit prázdný string a nulové tokeny při chybě
     
     def get_available_models(self) -> List[str]:
         """
@@ -153,6 +180,11 @@ class AnthropicVisionModelProvider(VisionModelProvider):
         "claude-3-haiku-20240307"
     ]
     
+    # Limity tokenů pro čekání (sdílené s textovým providerem, pokud jsou stejná instance?)
+    # Pro jistotu je definujeme i zde, i když by instance měla být sdílená v rámci logiky
+    INPUT_TOKEN_THRESHOLD = 40000
+    OUTPUT_TOKEN_THRESHOLD = 8000
+    
     def __init__(self, model_name: str = "claude-3-haiku-20240307"):
         """
         Inicializace poskytovatele Anthropic Vision.
@@ -163,6 +195,10 @@ class AnthropicVisionModelProvider(VisionModelProvider):
         self.model_name = model_name
         self.api_key = None
         self.api_base = "https://api.anthropic.com/v1"
+        # Kumulativní počty tokenů pro sledování limitu
+        self.cumulative_input_tokens = 0
+        self.cumulative_output_tokens = 0
+        self.last_reset_time = time.time()
     
     def initialize(self, api_key: Optional[str] = None, **kwargs) -> None:
         """
@@ -188,6 +224,25 @@ class AnthropicVisionModelProvider(VisionModelProvider):
         if "model_name" in kwargs:
             self.model_name = kwargs["model_name"]
     
+    def _check_and_wait_for_rate_limit(self):
+        """Zkontroluje kumulativní tokeny a počká, pokud je dosaženo prahu."""
+        # Zjednodušený reset - pokud uplynula více než minuta od posledního resetu, vynulujeme
+        if time.time() - self.last_reset_time > 60:
+             print("Uplynula minuta od posledního resetu/čekání, resetuji kumulativní tokeny.")
+             self.cumulative_input_tokens = 0
+             self.cumulative_output_tokens = 0
+             self.last_reset_time = time.time()
+
+        if self.cumulative_input_tokens >= self.INPUT_TOKEN_THRESHOLD or \
+           self.cumulative_output_tokens >= self.OUTPUT_TOKEN_THRESHOLD:
+            print(f"WARN: Dosažen práh tokenů (In: {self.cumulative_input_tokens}/{self.INPUT_TOKEN_THRESHOLD}, Out: {self.cumulative_output_tokens}/{self.OUTPUT_TOKEN_THRESHOLD}). Čekám 60 sekund...")
+            time.sleep(60)
+            print("Pokračuji po čekání...")
+            # Po čekání resetujeme čítače a čas
+            self.cumulative_input_tokens = 0
+            self.cumulative_output_tokens = 0
+            self.last_reset_time = time.time()
+
     @staticmethod
     def encode_image(image: Image.Image) -> str:
         """
@@ -203,7 +258,7 @@ class AnthropicVisionModelProvider(VisionModelProvider):
         image.save(buffered, format="JPEG")
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
     
-    def generate_text_from_image(self, image: Image.Image, prompt: str, **kwargs) -> str:
+    def generate_text_from_image(self, image: Image.Image, prompt: str, **kwargs) -> tuple[str, dict]:
         """
         Generuje text na základě obrázku a promptu pomocí Anthropic API.
         
@@ -213,22 +268,19 @@ class AnthropicVisionModelProvider(VisionModelProvider):
             **kwargs: Další parametry pro generování textu
             
         Returns:
-            Vygenerovaný text
+            tuple: Vygenerovaný text a slovník s počty tokenů ({'input_tokens': N, 'output_tokens': M})
         """
-        # Zakódování obrázku do base64
+        # Kontrola limitu PŘED voláním API
+        self._check_and_wait_for_rate_limit()
+
         image_base64 = self.encode_image(image)
-        
-        # Příprava dotazu pro API
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01"
         }
-        
         temperature = kwargs.get("temperature", 0.0)
         max_tokens = kwargs.get("max_tokens", 1000)
-        
-        # Vytvoření zprávy s obrázkem
         payload = {
             "model": self.model_name,
             "messages": [
@@ -237,11 +289,7 @@ class AnthropicVisionModelProvider(VisionModelProvider):
                     "content": [
                         {
                             "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_base64
-                            }
+                            "source": {"type": "base64", "media_type": "image/jpeg", "data": image_base64}
                         },
                         {
                             "type": "text",
@@ -253,39 +301,40 @@ class AnthropicVisionModelProvider(VisionModelProvider):
             "temperature": temperature,
             "max_tokens": max_tokens
         }
-        
-        # Odeslání dotazu
+        token_usage = {"input_tokens": 0, "output_tokens": 0} # Default
         try:
-            print(f"Odesílám požadavek na Anthropic API s obrázkem (model: {self.model_name})")
-            print(f"API klíč začíná: {self.api_key[:10]}..., délka: {len(self.api_key)}")
+            print(f"Odesílám požadavek na Anthropic Vision API (model: {self.model_name})")
+            # print(f"API klíč začíná: {self.api_key[:10]}..., délka: {len(self.api_key)}")
+            response = requests.post(f"{self.api_base}/messages", headers=headers, json=payload, timeout=60) # Zvýšený timeout pro VLM
             
-            response = requests.post(
-                f"{self.api_base}/messages",
-                headers=headers,
-                json=payload,
-                timeout=60  # Delší timeout pro obrázky
-            )
-            
-            # Zpracování odpovědi
             if response.status_code == 200:
-                return response.json()["content"][0]["text"]
+                response_data = response.json()
+                text_content = response_data["content"][0]["text"]
+                # Extrahovat token usage, pokud existuje
+                if "usage" in response_data:
+                    usage_data = response_data["usage"]
+                    token_usage["input_tokens"] = usage_data.get("input_tokens", 0)
+                    token_usage["output_tokens"] = usage_data.get("output_tokens", 0)
+                    # Aktualizace kumulativních tokenů PO úspěšném volání
+                    self.cumulative_input_tokens += token_usage["input_tokens"]
+                    self.cumulative_output_tokens += token_usage["output_tokens"]
+                    print(f"  Anthropic Tokens Used (request): In={token_usage['input_tokens']}, Out={token_usage['output_tokens']}")
+                    print(f"  Anthropic Tokens Cumulative (since last wait/reset): In={self.cumulative_input_tokens}, Out={self.cumulative_output_tokens}")
+                return text_content, token_usage
             else:
                 try:
                     error_data = response.json()
                     error_type = error_data.get('error', {}).get('type', 'unknown')
                     error_message = error_data.get('error', {}).get('message', 'No message')
-                    error_msg = f"Chyba při dotazu na Anthropic API s obrázkem: {response.status_code} - {response.text}"
+                    error_msg = f"Chyba při dotazu na Anthropic Vision API: {response.status_code} - {response.text}"
                     print(f"Detaily chyby: typ={error_type}, zpráva={error_message}")
-                    print(f"Použitá URL: {self.api_base}/messages")
-                    print(f"Použité hlavičky: {headers}")
-                    raise Exception(error_msg)
                 except Exception as e:
-                    error_msg = f"Chyba při dotazu na Anthropic API s obrázkem: {response.status_code} - {response.text}"
+                    error_msg = f"Chyba při dotazu na Anthropic Vision API: {response.status_code} - {response.text}"
                     print(error_msg)
-                    raise Exception(error_msg)
+                return "", token_usage # Vrátit prázdný string a nulové tokeny při chybě
         except requests.exceptions.RequestException as e:
-            print(f"Síťová chyba při dotazu na Anthropic API s obrázkem: {e}")
-            raise Exception(f"Síťová chyba při dotazu na Anthropic API s obrázkem: {e}")
+            print(f"Síťová chyba při dotazu na Anthropic Vision API: {e}")
+            return "", token_usage # Vrátit prázdný string a nulové tokeny při chybě
     
     def get_available_models(self) -> List[str]:
         """

@@ -18,14 +18,18 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+import re # Přidán import pro sanitizaci
 
 # Cesty k důležitým adresářům a souborům
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = BASE_DIR / "config"
-RESULTS_DIR = BASE_DIR / "results"
 TEMP_CONFIG_FILE = CONFIG_DIR / "temp_model_config.json"
 MAIN_SCRIPT = BASE_DIR / "src" / "main.py"
 DEFAULT_CONFIG_FILE = CONFIG_DIR / "model_configs.json"
+
+# <<< Změna: Import runtime_config >>>
+from src.config.runtime_config import set_run_results_dir, get_run_results_dir
+# <<< Konec změny >>>
 
 
 def parse_args():
@@ -38,6 +42,9 @@ def parse_args():
     parser.add_argument('--skip-semantic', action='store_true', help="Přeskočí sémantické porovnání výsledků")
     parser.add_argument('--force-extraction', action='store_true', help="Vynutí novou extrakci i když výsledky již existují")
     parser.add_argument('--verbose', action='store_true', help="Podrobnější výstup")
+    # Přidání nového parametru pro generování pouze grafů
+    parser.add_argument('--graphs-only', action='store_true', help="Spustí pouze generování grafů z existujících výsledků")
+    parser.add_argument('--results-dir', type=str, default=None, help="Cesta k adresáři s existujícími výsledky (povinné při --graphs-only)")
     return parser.parse_args()
 
 
@@ -147,21 +154,42 @@ def save_temp_config(config: Dict[str, Any]) -> None:
         sys.exit(1)
 
 
+def sanitize_filename(name: str) -> str:
+    """Odstraní nebo nahradí neplatné znaky pro názvy souborů/adresářů."""
+    # Odstraní znaky, které jsou problematické v různých OS
+    # Ponechá písmena, čísla, podtržítka, pomlčky, tečky
+    sanitized = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', name)
+    # Nahradí více podtržítek za jedno
+    sanitized = re.sub(r'_+', '_', sanitized)
+    # Odstraní podtržítka na začátku/konci
+    sanitized = sanitized.strip('_')
+    # Omezení délky (volitelné)
+    # max_len = 50
+    # if len(sanitized) > max_len:
+    #     sanitized = sanitized[:max_len]
+    return sanitized or "default_name"
+
+
 def prepare_result_directory(config_name: str) -> str:
     """
-    Připraví adresář pro výsledky dané konfigurace.
+    Připraví adresář pro výsledky dané konfigurace v rámci hlavního adresáře běhu.
     
     Args:
         config_name (str): Název konfigurace
         
     Returns:
-        str: Cesta k adresáři s výsledky
+        str: Cesta k adresáři s výsledky pro danou konfiguraci
     """
-    # Vytvoříme adresář pro výsledky s časovým razítkem
+    main_run_dir = get_run_results_dir() # Získáme hlavní adresář běhu run_all_models
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = RESULTS_DIR / f"{config_name}_{timestamp}"
-    result_dir.mkdir(parents=True, exist_ok=True)
-    return str(result_dir)
+    # <<< Změna: Sanitizace názvu konfigurace >>>
+    sanitized_config_name = sanitize_filename(config_name)
+    # Název adresáře bude obsahovat sanitizovaný název konfigurace a časové razítko
+    result_dir_path = main_run_dir / f"{sanitized_config_name}_{timestamp}"
+    # <<< Konec změny >>>
+    result_dir_path.mkdir(parents=True, exist_ok=True)
+    print(f"Adresář pro výsledky konfigurace '{config_name}': {result_dir_path}")
+    return str(result_dir_path)
 
 
 def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str]) -> str | None:
@@ -185,8 +213,9 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
     # Nastavení argumentů pro spuštění hlavního programu
     cmd_args = [
         sys.executable,
-        str(MAIN_SCRIPT),
-        "--models", "embedded", "vlm", "text",  # Přidána textová pipeline
+        "-m", "src.main", # Spustit jako modul
+        "--models", "embedded", "vlm", "text",
+        "--output-dir", result_dir,
         "--limit", str(args.limit) if args.limit else "100",
     ]
     
@@ -212,40 +241,9 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
         # Kopírujeme konfigurační soubor do adresáře s výsledky pro pozdější referenci
         shutil.copy(TEMP_CONFIG_FILE, Path(result_dir) / "used_config.json")
         
-        # Kopírujeme výsledky do specifického adresáře
-        result_files = [
-            "embedded_results.json",
-            "vlm_results.json",
-            "text_results.json",  # Přidány výsledky textové pipeline
-            "embedded_comparison.json",
-            "vlm_comparison.json",
-            "text_comparison.json",  # Přidáno porovnání textové pipeline
-            "semantic_comparison_results.json",
-            "embedded_comparison_semantic.json",
-            "vlm_comparison_semantic.json",
-            "text_comparison_semantic.json",  # Přidáno sémantické porovnání textové pipeline
-            "comparison_results.png",
-            "overall_results.png",
-            "comparison_results_boxplot.png", # Přidán box plot porovnání polí
-            "overall_results_boxplot.png",  # Přidán celkový box plot
-            "overall_results.csv",
-            "detailed_results.csv", # Pozn.: Může být nahrazeno novými CSV
-            "summary_results.csv", # Nový souhrn s průměry a std dev
-            "overall_summary_results.csv", # Nový celkový souhrn
-            "detailed_scores_all.csv" # Nová detailní data pro box ploty
-        ]
-        
-        # Kopírujeme všechny výsledky, které existují
-        for filename in result_files:
-            source_file = RESULTS_DIR / filename
-            if source_file.exists():
-                print(f"Kopíruji {filename} do adresáře výsledků...")
-                shutil.copy(source_file, Path(result_dir) / filename)
-        
-        # Aktualizujeme slovník zpracovaných modelů
-        processed_models[f"{config['text']['provider']}_{config['text']['model']}"] = result_dir
-        processed_models[f"{config['vision']['provider']}_{config['vision']['model']}"] = result_dir
-        processed_models[f"{config['embedding']['provider']}_{config['embedding']['model']}"] = result_dir
+        # Aktualizujeme slovník zpracovaných modelů (pro budoucí použití, např. přeskakování)
+        # Klíč může být název konfigurace nebo kombinace modelů
+        processed_models[config_name] = result_dir
             
         return result_dir
             
@@ -316,24 +314,23 @@ def combine_existing_results(text_model_dir: str, vision_model_dir: str, embeddi
 
 def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> None:
     """
-    Vytvoří souhrnné porovnání všech modelů.
+    Vytvoří souhrnné porovnání výsledků ze všech spuštěných konfigurací.
     
     Args:
-        result_dirs (List[str]): Seznam cest k adresářům s výsledky jednotlivých běhů
-        is_final (bool): Zda jde o finální porovnání (pro účely výpisu zpráv)
+        result_dirs (List[str]): Seznam cest k adresářům s výsledky jednotlivých konfigurací.
+        is_final (bool): Zda se jedná o finální porovnání po všech bězích.
     """
-    if not is_final:
-        print("\n=== Aktualizuji průběžné porovnání modelů ===")
-    else:
-        print("\n=== Vytvářím finální porovnání všech modelů ===")
+    if not result_dirs:
+        print("Žádné výsledky k porovnání.")
+        return
     
-    # Vytvoření výstupního adresáře pro souhrnné výsledky
-    summary_dir = RESULTS_DIR / "final_comparison"
-    summary_dir.mkdir(exist_ok=True)
+    # <<< Změna: Adresář pro souhrnné výsledky v hlavním adresáři běhu >>>
+    summary_dir = get_run_results_dir() / "final_comparison"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    # <<< Konec změny >>>
     
-    # Načtení dat ze všech běhů - ZMĚNA: Budeme načítat z CSV souborů
-    all_summary_dfs = []
-    all_overall_dfs = []
+    all_summaries = []
+    all_overalls = []
     model_names = []
 
     print(f"Prohledávám {len(result_dirs)} adresářů s výsledky pro summary a overall CSV...")
@@ -345,6 +342,7 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
         # Jednoduchý přístup: použít název adresáře
         model_name = result_dir.name 
         # Lze vylepšit načtením z used_config.json, pokud je potřeba specifičtější název
+        config_name_from_dir = result_dir.name # Použijeme název adresáře jako základ
 
         summary_csv_path = result_dir / "summary_results.csv"
         overall_csv_path = result_dir / "overall_summary_results.csv"
@@ -353,9 +351,15 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
         if summary_csv_path.exists():
             try:
                 df_summary = pd.read_csv(summary_csv_path)
-                # Přidáme sloupec s názvem modelu
-                df_summary['Model'] = model_name 
-                all_summary_dfs.append(df_summary)
+                # <<< Změna: Kombinace názvu konfigurace a modelu z CSV >>>
+                # Očekáváme sloupec 'Model' v CSV (např. EMBEDDED, VLM, TEXT)
+                if 'Model' in df_summary.columns:
+                    df_summary['Model'] = df_summary['Model'].apply(lambda m: f"{config_name_from_dir}-{m}")
+                else:
+                    print(f"Varování: Chybí sloupec 'Model' v {summary_csv_path}. Používám pouze název adresáře.")
+                    df_summary['Model'] = config_name_from_dir
+                # <<< Konec změny >>>
+                all_summaries.append(df_summary)
                 found_summary = True
                 print(f"  Načten soubor: {summary_csv_path}")
             except Exception as e:
@@ -367,9 +371,15 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
         if overall_csv_path.exists():
             try:
                 df_overall = pd.read_csv(overall_csv_path)
-                 # Přidáme sloupec s názvem modelu
-                df_overall['Model'] = model_name
-                all_overall_dfs.append(df_overall)
+                 # <<< Změna: Kombinace názvu konfigurace a modelu z CSV >>>
+                 # Očekáváme sloupec 'Model' v CSV (např. EMBEDDED, VLM, TEXT)
+                if 'Model' in df_overall.columns:
+                    df_overall['Model'] = df_overall['Model'].apply(lambda m: f"{config_name_from_dir}-{m}")
+                else:
+                    print(f"Varování: Chybí sloupec 'Model' v {overall_csv_path}. Používám pouze název adresáře.")
+                    df_overall['Model'] = config_name_from_dir
+                # <<< Konec změny >>>
+                all_overalls.append(df_overall)
                 found_overall = True
                 print(f"  Načten soubor: {overall_csv_path}")
             except Exception as e:
@@ -378,17 +388,18 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
              print(f"  Soubor nenalezen: {overall_csv_path}")
 
         if found_summary or found_overall:
-             if model_name not in model_names: # Přidat jen unikátní jména
-                model_names.append(model_name)
+             # Přidáváme pouze název konfigurace, unikátní modely budou v DataFrame
+             if config_name_from_dir not in model_names: 
+                model_names.append(config_name_from_dir)
 
 
-    if not all_summary_dfs and not all_overall_dfs:
+    if not all_summaries and not all_overalls:
         print("Nenalezeny žádné výsledky (summary_results.csv nebo overall_summary_results.csv) pro porovnání.")
         return
 
     # Spojení DataFrames
-    final_summary_df = pd.concat(all_summary_dfs, ignore_index=True) if all_summary_dfs else pd.DataFrame()
-    final_overall_df = pd.concat(all_overall_dfs, ignore_index=True) if all_overall_dfs else pd.DataFrame()
+    final_summary_df = pd.concat(all_summaries, ignore_index=True) if all_summaries else pd.DataFrame()
+    final_overall_df = pd.concat(all_overalls, ignore_index=True) if all_overalls else pd.DataFrame()
     
     if final_summary_df.empty and final_overall_df.empty:
         print("Nebylo možné spojit žádná data z CSV souborů.")
@@ -450,7 +461,9 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
             plt.ylim(0, max(1.05, (means + errors).max() * 1.1)) # Dynamický horní limit Y osy
             plt.tight_layout()
             
+            # <<< Změna: Uložení do summary_dir >>>
             output_file = summary_dir / f"{field}_comparison.png"
+            # <<< Konec změny >>>
             try:
                 plt.savefig(output_file)
                 created_files.append(output_file.name)
@@ -459,7 +472,9 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
             plt.close()
             
             # Uložení CSV pro dané pole (volitelné, lze nahradit jedním souhrnným CSV)
+            # <<< Změna: Uložení do summary_dir >>>
             output_csv = summary_dir / f"{field}_comparison.csv"
+            # <<< Konec změny >>>
             try:
                 # Ukládáme jen relevantní sloupce
                 df_field[['Model', 'Mean_Total', 'Std_Total']].to_csv(output_csv, index=False, float_format='%.4f')
@@ -501,7 +516,9 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
         plt.ylim(0, max(1.05, (means_overall + errors_overall).max() * 1.1))
         plt.tight_layout()
         
+        # <<< Změna: Uložení do summary_dir >>>
         output_file = summary_dir / "overall_comparison.png"
+        # <<< Konec změny >>>
         try:
             plt.savefig(output_file)
             created_files.append(output_file.name)
@@ -510,7 +527,9 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
         plt.close()
 
         # Uložení celkového CSV (volitelné, lze nahradit jedním souhrnným)
+        # <<< Změna: Uložení do summary_dir >>>
         output_csv_overall = summary_dir / "overall_comparison.csv"
+        # <<< Konec změny >>>
         try:
             # Ukládáme jen relevantní sloupce
             df_overall_sorted[['Model', 'Mean_Total_Overall', 'Std_Total_Overall']].to_csv(output_csv_overall, index=False, float_format='%.4f')
@@ -520,8 +539,10 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
              
         # Uložení spojených finálních dat (volitelné, ale užitečné)
         try:
+            # <<< Změna: Uložení do summary_dir >>>
             final_summary_df.to_csv(summary_dir / "final_summary_all_fields.csv", index=False, float_format='%.4f')
             final_overall_df.to_csv(summary_dir / "final_overall_all_models.csv", index=False, float_format='%.4f')
+            # <<< Konec změny >>>
             created_files.append("final_summary_all_fields.csv")
             created_files.append("final_overall_all_models.csv")
         except Exception as e:
@@ -558,9 +579,99 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
          print("\nNebylo možné určit pořadí modelů - chybí sloupec 'Mean_Total_Overall'.")
 
 
+def generate_graphs_only(results_dir: str):
+    """
+    Generuje pouze grafy z existujících výsledků bez spouštění extrakce.
+    
+    Args:
+        results_dir (str): Cesta k adresáři s výsledky
+    """
+    if not results_dir:
+        print("CHYBA: Při použití --graphs-only musíte zadat cestu k adresáři s výsledky (--results-dir)")
+        sys.exit(1)
+    
+    results_path = Path(results_dir)
+    if not results_path.exists() or not results_path.is_dir():
+        print(f"CHYBA: Zadaný adresář s výsledky '{results_dir}' neexistuje nebo není adresář")
+        sys.exit(1)
+    
+    print(f"\n=== Generování grafů z existujících výsledků v adresáři: {results_dir} ===")
+    
+    # Nastavení adresáře s výsledky jako hlavní adresář běhu
+    set_run_results_dir(results_path)
+    
+    # Najdeme všechny podadresáře, které odpovídají konfiguracím
+    # (přeskočíme adresář final_comparison, který obsahuje souhrnné grafy)
+    config_dirs = [d for d in results_path.iterdir() 
+                  if d.is_dir() and d.name != "final_comparison"]
+    
+    if not config_dirs:
+        print("Nebyly nalezeny žádné adresáře s konfiguracemi.")
+        return
+    
+    print(f"Nalezeno {len(config_dirs)} adresářů s konfiguracemi.")
+    
+    # Seznam adresářů pro vytvoření souhrnných grafů
+    result_dirs = []
+    
+    # Pro každou konfiguraci spustíme skript na generování grafů
+    for config_dir in config_dirs:
+        print(f"\nZpracovávám konfiguraci: {config_dir.name}")
+        
+        # Kontrola, zda existují potřebné soubory pro generování grafů
+        csv_files = list(config_dir.glob("*.csv"))
+        json_files = list(config_dir.glob("*comparison*.json"))
+        
+        if not csv_files or not json_files:
+            print(f"Adresář {config_dir.name} neobsahuje potřebné soubory (CSV nebo JSON). Přeskakuji.")
+            continue
+        
+        # Nastavení adresáře konfigurace jako aktuální adresář pro výsledky
+        set_run_results_dir(config_dir)
+        
+        # Generování grafů pomocí příkazu pro main.py
+        cmd_args = [
+            sys.executable,
+            "-m", "src.main",
+            "--graphs-only",
+            "--output-dir", str(config_dir)
+        ]
+        
+        print(f"Spouštím příkaz: {' '.join(cmd_args)}")
+        try:
+            result = subprocess.run(cmd_args, check=True)
+            print(f"Generování grafů dokončeno s návratovým kódem: {result.returncode}")
+            result_dirs.append(str(config_dir))
+        except subprocess.CalledProcessError as e:
+            print(f"Chyba při generování grafů: {e}")
+        except Exception as e:
+            print(f"Neočekávaná chyba: {e}")
+    
+    # Nastavení hlavního adresáře běhu zpět na původní hodnotu
+    set_run_results_dir(results_path)
+    
+    # Vytvoření souhrnných grafů
+    if result_dirs:
+        print("\n=== Generování souhrnných grafů ===")
+        create_final_comparison(result_dirs, is_final=True)
+    else:
+        print("\nNebyly nalezeny žádné adresáře s platným formátem dat pro vytvoření souhrnných grafů.")
+
+
 def main():
     """Hlavní funkce skriptu."""
     args = parse_args()
+    
+    # Zpracování parametru --graphs-only
+    if args.graphs_only:
+        generate_graphs_only(args.results_dir)
+        return
+    
+    # <<< Změna: Nastavení hlavního adresáře pro výsledky tohoto běhu run_all_models >>>
+    timestamp_all = datetime.now().strftime("%Y%m%d_%H%M%S")
+    overall_run_dir = BASE_DIR / "results" / f"all_models_{timestamp_all}"
+    set_run_results_dir(overall_run_dir)
+    # <<< Konec změny >>>
     
     # Zajistíme vytvoření konfiguračního souboru, pokud neexistuje
     default_config_path = ensure_config_file()

@@ -65,7 +65,7 @@ class GeminiTextModelProvider(TextModelProvider):
         if "model_name" in kwargs:
             self.model_name = kwargs["model_name"]
     
-    def generate_text(self, prompt: str, **kwargs) -> str:
+    def generate_text(self, prompt: str, **kwargs) -> tuple[str, dict]:
         """
         Generuje text na základě promptu pomocí Google Gemini API.
         
@@ -74,63 +74,43 @@ class GeminiTextModelProvider(TextModelProvider):
             **kwargs: Další parametry pro generování textu
             
         Returns:
-            Vygenerovaný text
+            tuple: Vygenerovaný text a slovník s počty tokenů ({'input_tokens': N, 'output_tokens': M})
         """
-        # Příprava dotazu pro API
         temperature = kwargs.get("temperature", 0.0)
         max_tokens = kwargs.get("max_tokens", 1000)
-        
         url = f"{self.api_base}/models/{self.model_name}:generateContent?key={self.api_key}"
-        
         payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": prompt
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens
-            }
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}
         }
+        headers = {"Content-Type": "application/json"}
+        token_usage = {"input_tokens": 0, "output_tokens": 0} # Default
         
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        # Odeslání dotazu
         try:
             print(f"Odesílám požadavek na Google Gemini API (model: {self.model_name})")
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
             
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=30  # Přidání timeoutu pro prevenci nekonečného čekání
-            )
-            
-            # Zpracování odpovědi
             if response.status_code == 200:
                 response_data = response.json()
+                text_content = ""
+                # Extrakce textu
                 if 'candidates' in response_data and len(response_data['candidates']) > 0:
-                    # Extrahujeme text z odpovědi
                     candidate = response_data['candidates'][0]
                     if 'content' in candidate and 'parts' in candidate['content']:
-                        parts = candidate['content']['parts']
-                        return parts[0].get('text', '')
-                    
-                return ""
+                        text_content = candidate['content']['parts'][0].get('text', '')
+                # Extrakce tokenů
+                if 'usageMetadata' in response_data:
+                    usage_meta = response_data['usageMetadata']
+                    token_usage['input_tokens'] = usage_meta.get('promptTokenCount', 0)
+                    token_usage['output_tokens'] = usage_meta.get('candidatesTokenCount', 0)
+                return text_content, token_usage
             else:
                 error_msg = f"Chyba při dotazu na Google Gemini API: {response.status_code} - {response.text}"
                 print(error_msg)
-                raise Exception(error_msg)
+                return "", token_usage # Vrátit default při chybě
         except requests.exceptions.RequestException as e:
             print(f"Síťová chyba při dotazu na Google Gemini API: {e}")
-            raise Exception(f"Síťová chyba při dotazu na Google Gemini API: {e}")
+            return "", token_usage # Vrátit default při chybě
     
     def get_available_models(self) -> List[str]:
         """
@@ -205,7 +185,7 @@ class GeminiVisionModelProvider(VisionModelProvider):
         image.save(buffered, format="JPEG")
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
     
-    def generate_text_from_image(self, image: Image.Image, prompt: str, **kwargs) -> str:
+    def generate_text_from_image(self, image: Image.Image, prompt: str, **kwargs) -> tuple[str, dict]:
         """
         Generuje text na základě obrázku a promptu pomocí Google Gemini API.
         
@@ -215,72 +195,52 @@ class GeminiVisionModelProvider(VisionModelProvider):
             **kwargs: Další parametry pro generování textu
             
         Returns:
-            Vygenerovaný text
+            tuple: Vygenerovaný text a slovník s počty tokenů ({'input_tokens': N, 'output_tokens': M})
         """
-        # Zakódování obrázku do base64
         image_base64 = self.encode_image(image)
-        
-        # Příprava dotazu pro API
         temperature = kwargs.get("temperature", 0.0)
         max_tokens = kwargs.get("max_tokens", 1000)
-        
         url = f"{self.api_base}/models/{self.model_name}:generateContent?key={self.api_key}"
-        
         payload = {
             "contents": [
                 {
                     "parts": [
-                        {
-                            "text": prompt
-                        },
-                        {
-                            "inline_data": {
-                                "mime_type": "image/jpeg",
-                                "data": image_base64
-                            }
-                        }
+                        {"text": prompt},
+                        {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
                     ]
                 }
             ],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens
-            }
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}
         }
+        headers = {"Content-Type": "application/json"}
+        token_usage = {"input_tokens": 0, "output_tokens": 0} # Default
         
-        headers = {
-            "Content-Type": "application/json"
-        }
-        
-        # Odeslání dotazu
         try:
             print(f"Odesílám požadavek na Google Gemini Vision API (model: {self.model_name})")
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
             
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=60  # Delší timeout pro zpracování obrázků
-            )
-            
-            # Zpracování odpovědi
             if response.status_code == 200:
                 response_data = response.json()
+                text_content = ""
+                # Extrakce textu
                 if 'candidates' in response_data and len(response_data['candidates']) > 0:
-                    # Extrahujeme text z odpovědi
                     candidate = response_data['candidates'][0]
                     if 'content' in candidate and 'parts' in candidate['content']:
-                        parts = candidate['content']['parts']
-                        return parts[0].get('text', '')
-                    
-                return ""
+                         # Může být více částí, spojíme je
+                         text_content = " ".join([p.get('text', '') for p in candidate['content']['parts']]).strip()
+                # Extrakce tokenů
+                if 'usageMetadata' in response_data:
+                    usage_meta = response_data['usageMetadata']
+                    token_usage['input_tokens'] = usage_meta.get('promptTokenCount', 0)
+                    token_usage['output_tokens'] = usage_meta.get('candidatesTokenCount', 0)
+                return text_content, token_usage
             else:
                 error_msg = f"Chyba při dotazu na Google Gemini Vision API: {response.status_code} - {response.text}"
                 print(error_msg)
-                raise Exception(error_msg)
+                return "", token_usage # Vrátit default při chybě
         except requests.exceptions.RequestException as e:
             print(f"Síťová chyba při dotazu na Google Gemini Vision API: {e}")
-            raise Exception(f"Síťová chyba při dotazu na Google Gemini Vision API: {e}")
+            return "", token_usage # Vrátit default při chybě
     
     def get_available_models(self) -> List[str]:
         """
@@ -349,51 +309,38 @@ class GeminiEmbeddingModelProvider(EmbeddingModelProvider):
         Returns:
             Seznam embedding vektorů
         """
-        results = []
+        # Příprava dotazu pro API
+        url = f"{self.api_base}/models/{self.model_name}:batchEmbedContents?key={self.api_key}"
+        headers = {"Content-Type": "application/json"}
         
-        for text in texts:
-            url = f"{self.api_base}/models/{self.model_name}:embedContent?key={self.api_key}"
+        # Gemini API očekává obsah ve formátu "contents"
+        requests_payload = [
+            {"model": f"models/{self.model_name}", "content": {"parts": [{"text": text}]}}
+            for text in texts
+        ]
+        
+        payload = {"requests": requests_payload}
+        
+        # Odeslání dotazu
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
             
-            payload = {
-                "model": f"models/{self.model_name}",
-                "content": {
-                    "parts": [
-                        {
-                            "text": text
-                        }
-                    ]
-                }
-            }
-            
-            headers = {
-                "Content-Type": "application/json"
-            }
-            
-            try:
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    response_data = response.json()
-                    # Extrahujeme vektor embeddingů
-                    if 'embedding' in response_data and 'values' in response_data['embedding']:
-                        embedding_values = response_data['embedding']['values']
-                        results.append(embedding_values)
-                    else:
-                        results.append([])
+            # Zpracování odpovědi
+            if response.status_code == 200:
+                data = response.json()
+                if "embeddings" in data:
+                    return [item["values"] for item in data["embeddings"]]
                 else:
-                    error_msg = f"Chyba při získávání embeddingů z Google Gemini API: {response.status_code} - {response.text}"
-                    print(error_msg)
-                    raise Exception(error_msg)
-            except requests.exceptions.RequestException as e:
-                print(f"Síťová chyba při dotazu na Google Gemini API: {e}")
-                raise Exception(f"Síťová chyba při dotazu na Google Gemini API: {e}")
-        
-        return results
+                    print("Chyba: Odpověď Gemini Embedding API neobsahuje klíč 'embeddings'.")
+                    # Vrátit prázdný seznam správné délky?
+                    return [[] for _ in texts]
+            else:
+                error_msg = f"Chyba při získávání embeddingů z Google Gemini API: {response.status_code} - {response.text}"
+                print(error_msg)
+                raise Exception(error_msg)
+        except requests.exceptions.RequestException as e:
+            print(f"Síťová chyba při získávání embeddingů z Google Gemini API: {e}")
+            raise Exception(f"Síťová chyba při získávání embeddingů z Google Gemini API: {e}")
     
     def get_available_models(self) -> List[str]:
         """
