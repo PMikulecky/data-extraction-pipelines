@@ -1037,7 +1037,7 @@ def load_json_with_nan_handling(file_path):
             return {"comparison": {}, "metrics": {}}
 
 
-def process_comparison_files(output_dir: Path, vlm_comparison_path: Optional[str] = None, embedded_comparison_path: Optional[str] = None, text_comparison_path: Optional[str] = None):
+def process_comparison_files(output_dir: Path, vlm_comparison_path: Optional[str] = None, embedded_comparison_path: Optional[str] = None, text_comparison_path: Optional[str] = None, hybrid_comparison_path: Optional[str] = None):
     """
     Zpracuje soubory s porovnáním a vytvoří sémanticky vylepšené porovnání.
     
@@ -1046,6 +1046,7 @@ def process_comparison_files(output_dir: Path, vlm_comparison_path: Optional[str
         vlm_comparison_path (str, optional): Cesta k souboru vlm_comparison.json
         embedded_comparison_path (str, optional): Cesta k souboru embedded_comparison.json
         text_comparison_path (str, optional): Cesta k souboru text_comparison.json
+        hybrid_comparison_path (str, optional): Cesta k souboru hybrid_comparison.json
         
     Returns:
         dict: Slovník s aktualizovanými daty pro každý zpracovaný model.
@@ -1058,7 +1059,8 @@ def process_comparison_files(output_dir: Path, vlm_comparison_path: Optional[str
     model_paths = {
         "vlm": vlm_comparison_path,
         "embedded": embedded_comparison_path,
-        "text": text_comparison_path
+        "text": text_comparison_path,
+        "hybrid": hybrid_comparison_path
     }
 
     for model_type, file_path in model_paths.items():
@@ -1108,6 +1110,7 @@ if __name__ == "__main__":
     vlm_comparison_path = RESULTS_DIR / "vlm_comparison.json"
     embedded_comparison_path = RESULTS_DIR / "embedded_comparison.json"
     text_comparison_path = RESULTS_DIR / "text_comparison.json"
+    hybrid_comparison_path = RESULTS_DIR / "hybrid_comparison.json"
     output_dir = RESULTS_DIR / "semantic_output"
     output_dir.mkdir(exist_ok=True)
     
@@ -1116,6 +1119,7 @@ if __name__ == "__main__":
         output_dir=output_dir,
         vlm_comparison_path=str(vlm_comparison_path),
         embedded_comparison_path=str(embedded_comparison_path),
-        text_comparison_path=str(text_comparison_path)
+        text_comparison_path=str(text_comparison_path),
+        hybrid_comparison_path=str(hybrid_comparison_path)
     )
     print("Příklad použití dokončen.") 

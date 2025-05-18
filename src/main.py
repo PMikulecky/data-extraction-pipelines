@@ -966,7 +966,7 @@ def generate_graphs_only():
     all_token_usages = {}
     
     # Kontrola existence souborů porovnání pro různé modely
-    for model in ['embedded', 'vlm', 'text']:
+    for model in ['embedded', 'vlm', 'text', 'hybrid']:  # <<< Změna: Přidání hybridní pipeline >>>
         # Nejprve zkusíme sémantické porovnání (priorita)
         semantic_comparison_file = get_run_results_dir() / f"{model}_comparison_semantic.json"
         basic_comparison_file = get_run_results_dir() / f"{model}_comparison.json"
@@ -979,7 +979,7 @@ def generate_graphs_only():
             print(f"Nalezen soubor základního porovnání pro {model}: {basic_comparison_file}")
     
     # Kontrola existence souborů s výsledky pro získání časů
-    for model in ['embedded', 'vlm', 'text']:
+    for model in ['embedded', 'vlm', 'text', 'hybrid']:  # <<< Změna: Přidání hybridní pipeline >>>
         results_file = get_run_results_dir() / f"{model}_results.json"
         if results_file.exists():
             try:
@@ -1012,8 +1012,8 @@ def main():
     """
     parser = argparse.ArgumentParser(description='Extrakce metadat z PDF souborů a porovnání výsledků.')
     parser.add_argument('--limit', type=int, default=None, help='Omezení počtu zpracovaných souborů')
-    parser.add_argument('--models', nargs='+', choices=['embedded', 'vlm', 'text'], default=['embedded'],
-                        help='Modely k použití (embedded, vlm, text)')
+    parser.add_argument('--models', nargs='+', choices=['embedded', 'vlm', 'text', 'hybrid'], default=['embedded'],
+                        help='Modely k použití (embedded, vlm, text, hybrid)')
     parser.add_argument('--year-filter', nargs='+', type=int, help='Filtrování článků podle roku')
     parser.add_argument('--verbose', '-v', action='store_true', help='Podrobnější výstup')
     parser.add_argument('--skip-download', action='store_true', help='Přeskočí stahování PDF souborů')
@@ -1024,6 +1024,10 @@ def main():
     parser.add_argument('--output-dir', type=str, default=None, help='Adresář pro uložení výsledků tohoto běhu')
     # <<< Konec změny >>>
     parser.add_argument('--graphs-only', action='store_true', help="Spustí pouze generování grafů z existujících výsledků")
+    # <<< Změna: Přidání parametru compare-only >>>
+    parser.add_argument('--compare-only', type=str, choices=['embedded', 'vlm', 'text', 'hybrid'], 
+                        help="Pouze porovná výsledky daného modelu s referenčními daty bez nové extrakce")
+    # <<< Konec změny >>>
     
     args = parser.parse_args()
     
@@ -1075,6 +1079,85 @@ def main():
         generate_graphs_only()
         return
     
+    # <<< Změna: Zpracování parametru --compare-only >>>
+    # Zpracování parametru --compare-only
+    if args.compare_only:
+        try:
+            print(f"\n=== Porovnávání existujících výsledků modelu {args.compare_only} ===")
+            
+            # Načtení referenčních dat
+            reference_data = prepare_reference_data(FILTERED_CSV)
+            
+            # Cesta k souboru s výsledky modelu
+            model_results_path = get_run_results_dir() / f"{args.compare_only}_results.json"
+            
+            if not model_results_path.exists():
+                print(f"CHYBA: Soubor s výsledky {model_results_path} neexistuje.")
+                return
+            
+            # Načtení výsledků modelu
+            try:
+                with open(model_results_path, 'r', encoding='utf-8') as f:
+                    model_data = json.load(f)
+                    results = model_data.get("results", [])
+                    
+                    if not results:
+                        print(f"CHYBA: Soubor {model_results_path} neobsahuje žádné výsledky.")
+                        return
+                    
+                    # Konverze seznamu výsledků na slovník podle DOI
+                    results_dict = {}
+                    for item in results:
+                        if "doi" in item:
+                            results_dict[item["doi"]] = item
+                    
+                    print(f"Načteno {len(results_dict)} výsledků z {model_results_path}")
+                    
+                    # Porovnání výsledků s referenčními daty
+                    comparison = compare_all_metadata(results_dict, reference_data)
+                    metrics = calculate_overall_metrics(comparison)
+                    
+                    comparison_results = {
+                        'comparison': comparison,
+                        'metrics': metrics
+                    }
+                    
+                    # Uložení výsledků porovnání
+                    comparison_output = get_run_results_dir() / f"{args.compare_only}_comparison.json"
+                    with open(comparison_output, 'w', encoding='utf-8') as f:
+                        json.dump(comparison_results, f, ensure_ascii=False, indent=2)
+                    print(f"Výsledky porovnání pro {args.compare_only} uloženy do {comparison_output}")
+                    
+                    # Pokud nemáme přeskočit sémantické porovnání, spustíme i to
+                    if not args.skip_semantic:
+                        from src.utils.semantic_comparison import process_comparison_files
+                        
+                        print(f"\n=== Sémantické porovnání výsledků {args.compare_only} ===")
+                        process_comparison_files(
+                            output_dir=get_run_results_dir(),
+                            vlm_comparison_path=str(comparison_output) if args.compare_only == "vlm" else None,
+                            embedded_comparison_path=str(comparison_output) if args.compare_only == "embedded" else None,
+                            text_comparison_path=str(comparison_output) if args.compare_only == "text" else None,
+                            hybrid_comparison_path=str(comparison_output) if args.compare_only == "hybrid" else None
+                        )
+                    
+                    # Vygenerujeme grafy na základě existujících souborů
+                    generate_graphs_only()
+                    
+            except Exception as e:
+                print(f"Chyba při načítání a porovnávání výsledků: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+        except Exception as e:
+            print(f"Chyba při porovnávání existujících výsledků: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+        
+        return
+    # <<< Konec změny >>>
+
     start_time = time.time()
     
     try:
