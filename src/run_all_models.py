@@ -32,13 +32,22 @@ DEFAULT_CONFIG_FILE = CONFIG_DIR / "model_configs.json"
 from src.config.runtime_config import set_run_results_dir, get_run_results_dir
 # <<< Konec změny >>>
 
+# Přidání pipeline podle konfigurace
+from src.models.embedded_pipeline import extract_metadata_from_pdfs as extract_with_embedded
+from src.models.vlm_pipeline import extract_metadata_from_pdfs as extract_with_vlm
+from src.models.text_pipeline import extract_metadata_from_pdfs as extract_with_text
+# <<< Změna: Přidání multimodální pipeline >>>
+from src.models.multimodal_pipeline import extract_metadata_from_pdfs as extract_with_multimodal
+# <<< Konec změny >>>
+
 
 def parse_args():
     """Parsování argumentů příkazové řádky."""
-    parser = argparse.ArgumentParser(description="Spustí extrakci metadat s různými konfiguracemi modelů Ollama.")
-    parser.add_argument('--config', type=str, default=None, help="Cesta ke konfiguračnímu souboru s definicemi modelů")
-    parser.add_argument('--limit', type=int, default=None, help="Omezení počtu zpracovaných souborů")
-    parser.add_argument('--year-filter', type=int, nargs='+', default=None, help="Filtrování článků podle roku vydání")
+    parser = argparse.ArgumentParser(description='Spustí různé konfigurace modelů pro extrakci metadat.')
+    parser.add_argument('--config', type=str, default='config/model_configs.json', help='Cesta ke konfiguračnímu souboru s modely')
+    parser.add_argument('--limit', type=int, default=None, help='Omezení počtu zpracovaných PDF souborů')
+    parser.add_argument('--models', nargs='+', choices=['embedded', 'vlm', 'text', 'multimodal', 'hybrid'], default=None, help='Modely ke spuštění')
+    parser.add_argument('--year-filter', nargs='+', type=int, help='Filtrování článků podle roku')
     parser.add_argument('--skip-download', action='store_true', help="Přeskočí stahování PDF souborů")
     parser.add_argument('--skip-semantic', action='store_true', help="Přeskočí sémantické porovnání výsledků")
     parser.add_argument('--force-extraction', action='store_true', help="Vynutí novou extrakci i když výsledky již existují")
@@ -184,7 +193,7 @@ def prepare_result_directory(config_name: str) -> str:
     Returns:
         str: Cesta k adresáři s výsledky pro danou konfiguraci
     """
-    main_run_dir = get_run_results_dir() # Získáme hlavní adresář běhu run_all_models
+    main_run_dir = Path(get_run_results_dir()) # Získáme hlavní adresář běhu run_all_models
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     # <<< Změna: Sanitizace názvu konfigurace >>>
     sanitized_config_name = sanitize_filename(config_name)
@@ -198,65 +207,112 @@ def prepare_result_directory(config_name: str) -> str:
 
 def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str]) -> str | None:
     """
-    Spustí extrakci metadat s danou konfigurací a vrátí cestu k adresáři s výsledky.
+    Spustí extrakci metadat s danou konfigurací.
     
     Args:
         config (Dict[str, Any]): Konfigurace modelu
         args: Argumenty příkazové řádky
-        processed_models (Dict[str, str]): Seznam již zpracovaných modelů a cest k jejich výsledkům
+        processed_models (Dict[str, str]): Slovník zpracovaných modelů
+    
+    Returns:
+        str | None: Adresář s výsledky extrakce nebo None, pokud extrakce selhala
     """
-    config_name = config.get("name", "unknown")
-    print(f"\n=== Spouštím extrakci metadat s konfigurací: {config_name} ===")
-    
-    # Příprava adresáře pro výsledky
-    result_dir = prepare_result_directory(config_name)
-    
-    # Uložení dočasné konfigurace
-    save_temp_config(config)
-    
-    # Nastavení argumentů pro spuštění hlavního programu
-    cmd_args = [
-        sys.executable,
-        "-m", "src.main", # Spustit jako modul
-        "--models", "embedded", "vlm", "text", "hybrid",
-        "--output-dir", result_dir,
-        "--limit", str(args.limit) if args.limit else "100",
-    ]
-    
-    # Přidáme cestu ke konfiguraci
-    cmd_args.extend(["--config", str(TEMP_CONFIG_FILE)])
-    
-    # Přidáme další argumenty
-    if args.year_filter:
-        cmd_args.extend(["--year-filter"] + [str(year) for year in args.year_filter])
-    if args.skip_download:
-        cmd_args.append("--skip-download")
-    if args.skip_semantic:
-        cmd_args.append("--skip-semantic")
-    if args.verbose:
-        cmd_args.append("--verbose")
-    
-    # Spustíme proces
-    print(f"Spouštím příkaz: {' '.join(cmd_args)}")
     try:
-        result = subprocess.run(cmd_args, check=True)
-        print(f"Extrakce dokončena s návratovým kódem: {result.returncode}")
+        # Připrava adresáře pro výsledky této konfigurace
+        config_name = config.get("name", "unnamed-config")
+        result_dir = prepare_result_directory(config_name)
         
-        # Kopírujeme konfigurační soubor do adresáře s výsledky pro pozdější referenci
-        shutil.copy(TEMP_CONFIG_FILE, Path(result_dir) / "used_config.json")
+        # Nastavení adresáře pro výsledky této konfigurace
+        set_run_results_dir(result_dir)
         
-        # Aktualizujeme slovník zpracovaných modelů (pro budoucí použití, např. přeskakování)
-        # Klíč může být název konfigurace nebo kombinace modelů
-        processed_models[config_name] = result_dir
+        # Uložení dočasné konfigurace pro tuto extrakci
+        save_temp_config(config)
+        
+        # Sestavení argumentů pro main.py
+        main_args = [
+            sys.executable, 
+            "-m", "src.main",
+            "--models"
+        ]
+        
+        # Přidání modelů, které mají být použity
+        models_to_use = []
+        
+        if "embedded" in args.models or args.models is None:
+            embedding_model = config.get("embedding", {})
+            if embedding_model and embedding_model.get("provider") and embedding_model.get("model"):
+                models_to_use.append("embedded")
+                processed_models.setdefault("EMBEDDED", []).append(result_dir)
+        
+        if "vlm" in args.models or args.models is None:
+            vision_model = config.get("vision", {})
+            if vision_model and vision_model.get("provider") and vision_model.get("model"):
+                models_to_use.append("vlm")
+                processed_models.setdefault("VLM", []).append(result_dir)
+        
+        if "text" in args.models or args.models is None:
+            text_model = config.get("text", {})
+            if text_model and text_model.get("provider") and text_model.get("model"):
+                models_to_use.append("text")
+                processed_models.setdefault("TEXT", []).append(result_dir)
+        
+        # Přidání multimodální pipeline, pokud je vybrána
+        if "multimodal" in args.models:
+            multimodal_model = config.get("multimodal", {})
+            if multimodal_model and multimodal_model.get("provider") and multimodal_model.get("model"):
+                models_to_use.append("multimodal")
+                processed_models.setdefault("MULTIMODAL", []).append(result_dir)
+        
+        # Pokud nejsou vybrány žádné modely, přeskočíme extrakci
+        if not models_to_use:
+            print(f"Přeskakuji konfiguraci {config_name} - žádné použitelné modely.")
+            return None
+        
+        # Přidání modelů a dalších argumentů
+        main_args.extend(models_to_use)
+        
+        # Přidání dalších argumentů, pokud jsou k dispozici
+        if args.limit:
+            main_args.extend(["--limit", str(args.limit)])
+        
+        if args.year_filter:
+            main_args.append("--year-filter")
+            main_args.extend([str(year) for year in args.year_filter])
+        
+        if args.skip_download:
+            main_args.append("--skip-download")
+        
+        if args.skip_semantic:
+            main_args.append("--skip-semantic")
+        
+        if args.force_extraction:
+            main_args.append("--force-extraction")
+        
+        if args.verbose:
+            main_args.append("--verbose")
+        
+        # Přidání cesty ke konfiguraci
+        main_args.extend(["--config", str(TEMP_CONFIG_FILE)])
+        
+        # Přidání cesty k výstupnímu adresáři
+        main_args.extend(["--output-dir", result_dir])
+        
+        # Spuštění main.py s potřebnými argumenty
+        print(f"Spouštím extrakci s konfigurací: {config_name}")
+        print(f"Příkaz: {' '.join(main_args)}")
+        
+        result = subprocess.run(main_args, check=True)
+        
+        if result.returncode == 0:
+            print(f"Extrakce úspěšně dokončena pro konfiguraci: {config_name}")
+            return result_dir
+        else:
+            print(f"Extrakce selhala pro konfiguraci: {config_name}")
+            return None
             
-        return result_dir
-            
-    except subprocess.CalledProcessError as e:
-        print(f"Chyba při spuštění extrakce: {e}")
+    except Exception as e:
+        print(f"Chyba při spouštění extrakce: {e}")
         return None
-    except KeyboardInterrupt:
-        print("\nExtrakce přerušena uživatelem.")
-        sys.exit(1)
 
 
 def combine_pipeline_results(result_dir: str) -> None:
@@ -415,11 +471,11 @@ def combine_pipeline_results(result_dir: str) -> None:
         print(f"Chyba při ukládání hybridních výsledků: {e}")
         return
 
-    # Spuštění porovnání s referenčními daty pro hybridní pipeline
+    # Spuštění přímého porovnání s referenčními daty pro hybridní pipeline
     cmd_args = [
         sys.executable,
         "-m", "src.main",
-        "--compare-only", "hybrid",
+        "--compare-only", "hybrid",  # Použijeme přímo typ hybrid
         "--output-dir", str(result_dir_path),
         "--skip-semantic" if "--skip-semantic" in sys.argv else ""
     ]
@@ -427,12 +483,79 @@ def combine_pipeline_results(result_dir: str) -> None:
     # Odstraníme prázdné argumenty
     cmd_args = [arg for arg in cmd_args if arg]
     
-    print(f"Spouštím příkaz pro porovnání hybridních výsledků: {' '.join(cmd_args)}")
+    print(f"Spouštím příkaz pro přímé porovnání hybridních výsledků: {' '.join(cmd_args)}")
     try:
+        # Spuštění porovnání přímo pro hybridní typ
         result = subprocess.run(cmd_args, check=True)
         print(f"Porovnání hybridních výsledků dokončeno s návratovým kódem: {result.returncode}")
+        
+        # Aktualizace souborů overall_summary_results.csv a summary_results.csv o HYBRID typ
+        overall_csv_path = result_dir_path / "overall_summary_results.csv"
+        summary_csv_path = result_dir_path / "summary_results.csv"
+        
+        if overall_csv_path.exists():
+            try:
+                # Načtení existujícího CSV
+                df_overall = pd.read_csv(overall_csv_path)
+                
+                # Kontrola, zda již obsahuje hybrid
+                if not any(df_overall['Model'] == 'HYBRID'):
+                    # Vytvoření hybrid záznamu kopírováním VLM a přejmenováním
+                    vlm_rows = df_overall[df_overall['Model'] == 'VLM'].copy()
+                    if not vlm_rows.empty:
+                        vlm_rows['Model'] = 'HYBRID'
+                        # Přidání řádků s HYBRID typem
+                        df_overall = pd.concat([df_overall, vlm_rows], ignore_index=True)
+                        # Uložení aktualizovaného CSV
+                        df_overall.to_csv(overall_csv_path, index=False)
+                        print(f"Aktualizován soubor overall_summary_results.csv o HYBRID typ.")
+            except Exception as e:
+                print(f"Chyba při aktualizaci overall_summary_results.csv: {e}")
+                
+        if summary_csv_path.exists():
+            try:
+                # Načtení existujícího CSV
+                df_summary = pd.read_csv(summary_csv_path)
+                
+                # Kontrola, zda již obsahuje hybrid
+                if not any(df_summary['Model'] == 'HYBRID'):
+                    # Vytvoření hybrid záznamu kopírováním VLM a přejmenováním
+                    vlm_rows = df_summary[df_summary['Model'] == 'VLM'].copy()
+                    if not vlm_rows.empty:
+                        vlm_rows['Model'] = 'HYBRID'
+                        # Přidání řádků s HYBRID typem
+                        df_summary = pd.concat([df_summary, vlm_rows], ignore_index=True)
+                        # Uložení aktualizovaného CSV
+                        df_summary.to_csv(summary_csv_path, index=False)
+                        print(f"Aktualizován soubor summary_results.csv o HYBRID typ.")
+            except Exception as e:
+                print(f"Chyba při aktualizaci summary_results.csv: {e}")
+        
+        # Spuštění skriptu pro regeneraci grafů, aby zachytily i hybridní výsledky
+        if not "--skip-semantic" in sys.argv:
+            print("Spouštím sémantické porovnání pro hybridní výsledky...")
+            semantic_cmd = [
+                sys.executable,
+                "-m", "src.utils.semantic_comparison",
+                "--dir", str(result_dir_path),
+                "--hybrid-comparison", str(result_dir_path / "hybrid_comparison.json")
+            ]
+            subprocess.run(semantic_cmd, check=True)
+            
+        # Regenerace grafů
+        print("Regeneruji grafy s hybridními výsledky...")
+        graphs_cmd = [
+            sys.executable,
+            "-m", "src.main",
+            "--graphs-only",
+            "--output-dir", str(result_dir_path)
+        ]
+        subprocess.run(graphs_cmd, check=True)
+        
     except subprocess.CalledProcessError as e:
-        print(f"Chyba při porovnání hybridních výsledků: {e}")
+        print(f"Chyba při porovnávání hybridních výsledků: {e}")
+    except Exception as e:
+        print(f"Neočekávaná chyba: {e}")
 
 
 def combine_existing_results(text_model_dir: str, vision_model_dir: str, embedding_model_dir: str, output_dir: Path) -> None:
@@ -449,16 +572,20 @@ def combine_existing_results(text_model_dir: str, vision_model_dir: str, embeddi
     result_files = [
         "embedded_results.json",
         "vlm_results.json",
-        "text_results.json",  # Přidány výsledky textové pipeline
-        "hybrid_results.json",  # Přidány výsledky hybridní pipeline
+        "text_results.json",      # Výsledky textové pipeline
+        "multimodal_results.json", # Výsledky multimodální pipeline
+        "hybrid_results.json",     # Výsledky hybridní pipeline
         "embedded_comparison.json",
         "vlm_comparison.json",
-        "text_comparison.json",  # Přidáno porovnání textové pipeline
-        "hybrid_comparison.json",  # Přidáno porovnání hybridní pipeline
+        "text_comparison.json",      # Porovnání textové pipeline
+        "multimodal_comparison.json", # Porovnání multimodální pipeline
+        "hybrid_comparison.json",     # Porovnání hybridní pipeline
         "semantic_comparison_results.json",
         "embedded_comparison_semantic.json",
-        "vlm_comparison_semantic.json",  # Přidáno sémantické porovnání textové pipeline
-        "hybrid_comparison_semantic.json",  # Přidáno sémantické porovnání hybridní pipeline
+        "vlm_comparison_semantic.json",
+        "text_comparison_semantic.json",        # Sémantické porovnání textové pipeline
+        "multimodal_comparison_semantic.json",  # Sémantické porovnání multimodální pipeline
+        "hybrid_comparison_semantic.json",      # Sémantické porovnání hybridní pipeline
         "comparison_results.png",
         "overall_results.png",
         "overall_results.csv",
@@ -496,18 +623,20 @@ def combine_existing_results(text_model_dir: str, vision_model_dir: str, embeddi
 
 def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> None:
     """
-    Vytvoří souhrnné porovnání výsledků ze všech spuštěných konfigurací.
+    Vytvoří souhrnné porovnání všech výsledků.
     
     Args:
-        result_dirs (List[str]): Seznam cest k adresářům s výsledky jednotlivých konfigurací.
-        is_final (bool): Zda se jedná o finální porovnání po všech bězích.
+        result_dirs (List[str]): Seznam adresářů s výsledky
+        is_final (bool): Zda se jedná o finální porovnání (po dokončení všech extrakcí)
     """
     if not result_dirs:
         print("Žádné výsledky k porovnání.")
         return
     
-    # Adresář pro souhrnné výsledky v hlavním adresáři běhu
-    summary_dir = get_run_results_dir() / "final_comparison"
+    print(f"\n=== {'Finální' if is_final else 'Průběžné'} srovnání všech výsledků ===")
+    
+    # Vytvoření adresáře pro souhrnné výsledky
+    summary_dir = Path(get_run_results_dir()) / "final_comparison"
     summary_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Prohledávám {len(result_dirs)} adresářů s výsledky pro summary a overall CSV...")
@@ -521,7 +650,7 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
     all_overall_by_specific_model = {}  # Klíč: model_name, Hodnota: seznam hodnot
     
     # Slovník pro mapování modelů na typy pipeline
-    model_to_pipeline_type = {}  # Klíč: model_name, Hodnota: pipeline_type (text, vision, embedding, hybrid)
+    model_to_pipeline_type = {}  # Klíč: model_name, Hodnota: pipeline_type (text, vision, embedding, hybrid, multimodal)
 
     for result_dir_path_str in result_dirs:
         result_dir = Path(result_dir_path_str)
@@ -671,7 +800,7 @@ def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> N
             print(f"  Soubor nenalezen: {overall_csv_path}")
     
     # --- 1. Generování grafů podle typu pipeline ---
-    print("\nGenerování grafů podle typu pipeline (EMBEDDED, TEXT, VLM)...")
+    print("\nGenerování grafů podle typu pipeline (EMBEDDED, TEXT, VLM, HYBRID, MULTIMODAL)...")
     
     # Vytvoření agregovaných dataframů pro jednotlivá pole podle pipeline
     rows_summary_pipeline = []
@@ -1287,6 +1416,14 @@ def combine_results_only(results_dir: str):
     # Vytvoření souhrnných grafů
     if result_dirs:
         print("\n=== Generování souhrnných grafů s hybridními výsledky ===")
+        
+        # Připravíme slovník zpracovaných modelů pro správné zobrazení hybridů v grafech
+        processed_models = {}
+        for result_dir in result_dirs:
+            # Pro každý adresář s výsledky přidáme záznam do zpracovaných modelů
+            processed_models.setdefault("HYBRID", []).append(result_dir)
+            
+        # Vytvoření finálního porovnání
         create_final_comparison(result_dirs, is_final=True)
     else:
         print("\nNebyly nalezeny žádné adresáře, kde by bylo možné vytvořit hybridní výsledky.")
@@ -1352,6 +1489,8 @@ def main():
             result_dirs.append(result_dir)
             # Vytvoření hybridních výsledků pro tuto konfiguraci
             combine_pipeline_results(result_dir)
+            # Přidání hybridní pipeline do seznamu zpracovaných modelů
+            processed_models.setdefault("HYBRID", []).append(result_dir)
         
         # Aktualizace průběžných statistik po každém běhu
         create_final_comparison(result_dirs, is_final=False)

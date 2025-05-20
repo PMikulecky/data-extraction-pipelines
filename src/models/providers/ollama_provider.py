@@ -9,10 +9,11 @@ import os
 import base64
 from io import BytesIO
 import requests
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from PIL import Image
+import numpy as np
 
-from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingModelProvider
+from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingModelProvider, MultimodalModelProvider
 
 
 class OllamaTextModelProvider(TextModelProvider):
@@ -408,4 +409,99 @@ class OllamaEmbeddingModelProvider(EmbeddingModelProvider):
             Seznam názvů dostupných modelů
         """
         # Pro embedding můžeme použít jakýkoliv textový model z Ollama
-        return OllamaTextModelProvider().get_available_models() 
+        return OllamaTextModelProvider().get_available_models()
+
+
+class OllamaMultimodalModelProvider(MultimodalModelProvider):
+    """
+    Poskytovatel multimodálních modelů Ollama.
+    """
+    
+    # Seznam dostupných modelů
+    AVAILABLE_MODELS = [
+        "llama3.2-vision:11b", 
+        "bakllava:7b",
+        "llava:13b"
+    ]
+    
+    def __init__(self, model_name: Optional[str] = None, url: Optional[str] = None):
+        """
+        Inicializace poskytovatele multimodálního modelu Ollama.
+        
+        Args:
+            model_name: Název modelu
+            url: URL adresa Ollama serveru
+        """
+        super().__init__(model_name)
+        self.url = url or "http://localhost:11434"
+    
+    def initialize(self, api_key: Optional[str] = None, **kwargs) -> None:
+        """
+        Inicializuje poskytovatele.
+        
+        Args:
+            api_key: API klíč (není použit pro Ollama)
+            **kwargs: Další parametry pro inicializaci
+        """
+        # Ollama nepotřebuje API klíč, ale může přijímat různé další parametry
+        self.url = kwargs.get("url", self.url)
+        
+        # Kontrola, zda je Ollama API dostupné
+        try:
+            response = requests.get(f"{self.url}/api/tags")
+            if response.status_code != 200:
+                print(f"VAROVÁNÍ: Ollama API na {self.url} není dostupné. Status: {response.status_code}")
+        except Exception as e:
+            print(f"VAROVÁNÍ: Nepodařilo se připojit k Ollama API na {self.url}: {e}")
+    
+    def generate_text_from_image_and_text(self, image: Image.Image, text: str, prompt: str) -> tuple[str, Dict[str, int]]:
+        """
+        Generuje text na základě obrázku, textu a promptu.
+        
+        Args:
+            image: Obrázek
+            text: Doplňující text
+            prompt: Dotaz/prompt pro model
+            
+        Returns:
+            tuple: Vygenerovaný text a slovník s použitými tokeny
+        """
+        # Převod obrázku na Base64
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        
+        # Sestavení dotazu
+        payload = {
+            "model": self.model_name,
+            "prompt": f"{prompt}\n\nExtrahovaný text z dokumentu: {text}",
+            "images": [image_base64],
+            "stream": False
+        }
+        
+        # Volání API
+        try:
+            response = requests.post(f"{self.url}/api/generate", json=payload)
+            
+            if response.status_code == 200:
+                response_data = response.json()
+                text_result = response_data.get("response", "")
+                
+                # Aproximace počtu tokenů - Ollama API nevrací přesné počty tokenů
+                # Hrubý odhad: 1 token ≈ 4 znaky
+                prompt_tokens = len(prompt) + len(text) + 500  # 500 je odhad pro obrázek
+                completion_tokens = len(text_result)
+                
+                token_usage = {
+                    "input_tokens": prompt_tokens // 4,
+                    "output_tokens": completion_tokens // 4
+                }
+                
+                return text_result, token_usage
+            else:
+                print(f"Chyba při generování textu z obrázku a textu pomocí Ollama: {response.status_code} - {response.text}")
+                return "", {"input_tokens": 0, "output_tokens": 0}
+                
+        except Exception as e:
+            print(f"Chyba při generování textu z obrázku a textu pomocí Ollama: {e}")
+            return "", {"input_tokens": 0, "output_tokens": 0} 

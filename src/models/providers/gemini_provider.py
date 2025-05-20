@@ -10,11 +10,19 @@ import base64
 from io import BytesIO
 import json
 import requests
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from PIL import Image
 import re
 
-from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingModelProvider
+try:
+    import google.generativeai as genai
+    from google.generativeai.types import HarmCategory, HarmBlockThreshold
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    print("VAROVÁNÍ: Knihovna google-generativeai není k dispozici. Gemini provider nebude dostupný.")
+
+from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingModelProvider, MultimodalModelProvider
 
 
 class GeminiTextModelProvider(TextModelProvider):
@@ -350,3 +358,107 @@ class GeminiEmbeddingModelProvider(EmbeddingModelProvider):
             Seznam názvů dostupných modelů
         """
         return self.AVAILABLE_MODELS 
+
+
+class GeminiMultimodalModelProvider(MultimodalModelProvider):
+    """
+    Poskytovatel multimodálních modelů Gemini.
+    """
+    
+    # Seznam dostupných modelů
+    AVAILABLE_MODELS = [
+        "gemini-1.5-pro",
+        "gemini-1.5-flash"
+    ]
+    
+    def initialize(self, api_key: Optional[str] = None, **kwargs) -> None:
+        """
+        Inicializuje poskytovatele.
+        
+        Args:
+            api_key: API klíč pro Gemini
+            **kwargs: Další parametry pro inicializaci
+        """
+        if not GEMINI_AVAILABLE:
+            raise ImportError("Knihovna google-generativeai není nainstalována. Nainstalujte ji pomocí příkazu: pip install google-generativeai")
+        
+        # Použití API klíče z parametru nebo prostředí
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        
+        if not self.api_key:
+            raise ValueError("API klíč pro Gemini není zadán. Zadejte ho jako parametr nebo nastavte proměnnou prostředí GEMINI_API_KEY.")
+        
+        # Inicializace klienta
+        genai.configure(api_key=self.api_key)
+        
+        # Konfigurace modelu
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE
+        }
+        
+        # Generativní konfigurace
+        self.generation_config = {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 32,
+            "max_output_tokens": 500,
+        }
+        
+        try:
+            # Vytvoření modelu
+            self.model = genai.GenerativeModel(
+                model_name=self.model_name,
+                generation_config=self.generation_config,
+                safety_settings=safety_settings
+            )
+        except Exception as e:
+            print(f"Chyba při inicializaci Gemini modelu: {e}")
+            self.model = None
+    
+    def generate_text_from_image_and_text(self, image: Image.Image, text: str, prompt: str) -> tuple[str, Dict[str, int]]:
+        """
+        Generuje text na základě obrázku, textu a promptu.
+        
+        Args:
+            image: Obrázek
+            text: Doplňující text
+            prompt: Dotaz/prompt pro model
+            
+        Returns:
+            tuple: Vygenerovaný text a slovník s použitými tokeny
+        """
+        if not self.model:
+            self.initialize()
+        
+        # Sestavení dotazu s obrázkem a textem
+        full_prompt = f"{prompt}\n\nExtrahovaný text z dokumentu: {text}"
+        
+        # Zpracování vstupu
+        try:
+            # Vytvoření požadavku s obrázkem a textem
+            response = self.model.generate_content([full_prompt, image])
+            
+            # Extrakce odpovědi
+            if hasattr(response, 'text'):
+                text_result = response.text
+            else:
+                text_result = response.candidates[0].content.parts[0].text
+            
+            # Aproximace tokenů (Gemini API nevrací počty tokenů)
+            # Hrubý odhad: 1 token ≈ 4 znaky
+            prompt_tokens = len(full_prompt) + 500  # 500 je odhad pro obrázek
+            completion_tokens = len(text_result)
+            
+            token_usage = {
+                "input_tokens": prompt_tokens // 4,
+                "output_tokens": completion_tokens // 4
+            }
+            
+            return text_result, token_usage
+            
+        except Exception as e:
+            print(f"Chyba při generování textu z obrázku a textu pomocí Gemini: {e}")
+            return "", {"input_tokens": 0, "output_tokens": 0} 

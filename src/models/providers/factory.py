@@ -8,11 +8,16 @@ Modul implementující tovární třídu pro vytváření instancí poskytovatel
 from typing import Dict, Optional, Type, Any, Union
 import os
 
-from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingModelProvider
+from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingModelProvider, MultimodalModelProvider
 from .openai_provider import OpenAITextModelProvider, OpenAIVisionModelProvider, OpenAIEmbeddingModelProvider
 from .anthropic_provider import AnthropicTextModelProvider, AnthropicVisionModelProvider
 from .ollama_provider import OllamaTextModelProvider, OllamaEmbeddingModelProvider, OllamaVisionModelProvider
 from .gemini_provider import GeminiTextModelProvider, GeminiVisionModelProvider, GeminiEmbeddingModelProvider
+
+# Import multimodálních providerů
+from .openai_provider import OpenAIMultimodalModelProvider
+from .ollama_provider import OllamaMultimodalModelProvider
+from .gemini_provider import GeminiMultimodalModelProvider
 
 
 class ModelProviderFactory:
@@ -41,6 +46,13 @@ class ModelProviderFactory:
         "openai": OpenAIEmbeddingModelProvider,
         "ollama": OllamaEmbeddingModelProvider,
         "gemini": GeminiEmbeddingModelProvider
+    }
+    
+    # Mapování názvů poskytovatelů na implementace MultimodalModelProvider
+    MULTIMODAL_PROVIDERS = {
+        "openai": OpenAIMultimodalModelProvider,
+        "ollama": OllamaMultimodalModelProvider,
+        "gemini": GeminiMultimodalModelProvider
     }
     
     @classmethod
@@ -133,6 +145,40 @@ class ModelProviderFactory:
                            f"Podporovaní poskytovatelé: {list(cls.EMBEDDING_PROVIDERS.keys())}")
         
         provider_class = cls.EMBEDDING_PROVIDERS[provider_name]
+        
+        # Vytvoření instance poskytovatele
+        if model_name:
+            provider = provider_class(model_name=model_name)
+        else:
+            provider = provider_class()
+        
+        # Inicializace poskytovatele
+        provider.initialize(api_key=api_key, **kwargs)
+        
+        return provider
+    
+    @classmethod
+    def create_multimodal_provider(cls, provider_name: str, model_name: Optional[str] = None, api_key: Optional[str] = None, **kwargs) -> MultimodalModelProvider:
+        """
+        Vytvoří instanci MultimodalModelProvider.
+        
+        Args:
+            provider_name: Název poskytovatele (např. "openai", "ollama", "gemini")
+            model_name: Název modelu
+            api_key: API klíč
+            **kwargs: Další parametry pro inicializaci poskytovatele
+            
+        Returns:
+            Instance MultimodalModelProvider
+            
+        Raises:
+            ValueError: Pokud poskytovatel není podporován
+        """
+        if provider_name not in cls.MULTIMODAL_PROVIDERS:
+            raise ValueError(f"Poskytovatel '{provider_name}' není podporován pro multimodální modely. "
+                           f"Podporovaní poskytovatelé: {list(cls.MULTIMODAL_PROVIDERS.keys())}")
+        
+        provider_class = cls.MULTIMODAL_PROVIDERS[provider_name]
         
         # Vytvoření instance poskytovatele
         if model_name:

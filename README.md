@@ -176,6 +176,37 @@ Embedded Pipeline zpracovává PDF dokumenty následujícím způsobem:
 
 Vectorstore pro každý dokument je vytvářen v adresáři `vectorstore/embedded_pipeline` s náhodně generovaným ID, což zajišťuje izolaci dat a nezávislé zpracování dokumentů.
 
+## Multimodální Pipeline
+
+Multimodální pipeline představuje experimentální přístup, který kombinuje textové a obrazové zpracování v jednom kroku:
+
+1. Pro každé metadata jsou vybrány relevantní stránky dokumentu stejně jako u VLM pipeline
+2. Z každé stránky je extrahován jak obrázek, tak text, který se na ní nachází
+3. Multimodální model (např. GPT-4o nebo LLaMA Vision) obdrží oba typy dat současně
+4. Model generuje odpověď na základě kombinovaných vstupů
+
+Tento přístup umožňuje modelu využít výhody obou modalit:
+- **Vizuální kontext**: Formátování, umístění na stránce, grafické prvky
+- **Textový kontext**: Čistý text, který je někdy lépe čitelný než obraz
+
+### Výhody multimodální pipeline
+
+- Poskytuje modelu více kontextu pro správnou interpretaci
+- Může pomoci překonat omezení jednotlivých modalit (např. špatně naskenovaný text)
+- Potenciálně kombinuje výhody VLM a Text pipeline v jednom kroku
+
+### Použití Multimodální Pipeline
+
+Multimodální pipeline lze spustit několika způsoby:
+
+```bash
+# Jako součást běžného spuštění
+python -m src.main --models text vlm multimodal
+
+# V rámci hromadného vyhodnocení
+python -m src.run_all_models --models multimodal --limit 5
+```
+
 ## Hybridní Pipeline
 
 Hybridní pipeline kombinuje výsledky z Text a VLM pipeline pro dosažení lepších výsledků extrakce dat. Princip je následující:

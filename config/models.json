@@ -124,5 +124,30 @@
       "extract_references": true,
       "use_direct_pattern_extraction": true
     }
+  },
+  {
+    "name": "ollama-llama3:8b_llama3.2-vision:11b_nomic-embed-text:latest_llama3.2-vision:11b",
+    "text": {
+      "provider": "ollama",
+      "model": "llama3:8b"
+    },
+    "vision": {
+      "provider": "ollama",
+      "model": "llama3.2-vision:11b"
+    },
+    "embedding": {
+      "provider": "ollama",
+      "model": "nomic-embed-text:latest"
+    },
+    "multimodal": {
+      "provider": "ollama",
+      "model": "llama3.2-vision:11b"
+    },
+    "text_pipeline": {
+      "enabled": true,
+      "max_text_length": 6000,
+      "extract_references": true,
+      "use_direct_pattern_extraction": true
+    }
   }
 ] 

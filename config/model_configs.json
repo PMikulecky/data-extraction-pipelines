@@ -13,26 +13,9 @@
       "provider": "ollama",
       "model": "nomic-embed-text:latest"
     },
-    "text_pipeline": {
-      "enabled": true,
-      "max_text_length": 6000,
-      "extract_references": true,
-      "use_direct_pattern_extraction": true
-    }
-  },
-  {
-    "name": "qwen2.5:7b_minicpm-v:8b_mxbai-embed-large-335m",
-    "text": {
+    "multimodal": {
       "provider": "ollama",
-      "model": "qwen2.5:7b"
-    },
-    "vision": {
-      "provider": "ollama",
-      "model": "minicpm-v:8b"
-    },
-    "embedding": {
-      "provider": "ollama",
-      "model": "mxbai-embed-large:335m"
+      "model": "granite3.2-vision:2b"
     },
     "text_pipeline": {
       "enabled": true,
@@ -41,88 +24,179 @@
       "use_direct_pattern_extraction": true
     }
   },
-  {
-    "name": "llama3.2:3b_gemma3:12b_bge-m3:latest",
-    "text": {
-      "provider": "ollama",
-      "model": "llama3.2:3b"
-    },
-    "vision": {
-      "provider": "ollama",
-      "model": "llava-llama3:8b"
-    },
-    "embedding": {
-      "provider": "ollama",
-      "model": "bge-m3:latest"
-    },
-    "text_pipeline": {
-      "enabled": true,
-      "max_text_length": 6000,
-      "extract_references": true,
-      "use_direct_pattern_extraction": true
-    }
-  },
-  {
-    "name": "llama3.1:8b_gemma3:4b_snowflake-arctic-embed:335m",
-    "text": {
-      "provider": "ollama",
-      "model": "llama3.1:8b"
-    },
-    "vision": {
-      "provider": "ollama",
-      "model": "gemma3:4b"
-    },
-    "embedding": {
-      "provider": "ollama",
-      "model": "snowflake-arctic-embed:335m"
-    },
-    "text_pipeline": {
-      "enabled": true,
-      "max_text_length": 6000,
-      "extract_references": true,
-      "use_direct_pattern_extraction": true
-    }
-  },
-  {
-    "name": "phi4:14b_gemma3:12b_snowflake-arctic-embed2:latest",
-    "text": {
-      "provider": "ollama",
-      "model": "phi4:14b"
-    },
-    "vision": {
-      "provider": "ollama",
-      "model": "gemma3:12b"
-    },
-    "embedding": {
-      "provider": "ollama",
-      "model": "snowflake-arctic-embed2:latest"
-    },
-    "text_pipeline": {
-      "enabled": true,
-      "max_text_length": 6000,
-      "extract_references": true,
-      "use_direct_pattern_extraction": true
-    }
-  },
-  {
-    "name": "phi4:14b_llama3.2-vision:11b_paraphrase-multilingual:latest",
-    "text": {
-      "provider": "ollama",
-      "model": "phi4:14b"
-    },
-    "vision": {
-      "provider": "ollama",
-      "model": "llama3.2-vision:11b"
-    },
-    "embedding": {
-      "provider": "ollama",
-      "model": "paraphrase-multilingual:latest"
-    },
-    "text_pipeline": {
-      "enabled": true,
-      "max_text_length": 6000,
-      "extract_references": true,
-      "use_direct_pattern_extraction": true
-    }
-  }
+  // {
+  //   "name": "qwen2.5:7b_minicpm-v:8b_mxbai-embed-large-335m",
+  //   "text": {
+  //     "provider": "ollama",
+  //     "model": "qwen2.5:7b"
+  //   },
+  //   "vision": {
+  //     "provider": "ollama", 
+  //     "model": "minicpm-v:8b"
+  //   },
+  //   "embedding": {
+  //     "provider": "ollama",
+  //     "model": "mxbai-embed-large:335m"
+  //   },
+  //   "multimodal": {
+  //     "provider": "ollama",
+  //     "model": "minicpm-v:8b"
+  //   },
+  //   "text_pipeline": {
+  //     "enabled": true,
+  //     "max_text_length": 6000,
+  //     "extract_references": true,
+  //     "use_direct_pattern_extraction": true
+  //   }
+  // },
+  // {
+  //   "name": "llama3.2:3b_gemma3:12b_bge-m3:latest",
+  //   "text": {
+  //     "provider": "ollama",
+  //     "model": "llama3.2:3b"
+  //   },
+  //   "vision": {
+  //     "provider": "ollama",
+  //     "model": "llava-llama3:8b"
+  //   },
+  //   "embedding": {
+  //     "provider": "ollama",
+  //     "model": "bge-m3:latest"
+  //   },
+  //   "multimodal": {
+  //     "provider": "ollama",
+  //     "model": "llava-llama3:8b"
+  //   },
+  //   "text_pipeline": {
+  //     "enabled": true,
+  //     "max_text_length": 6000,
+  //     "extract_references": true,
+  //     "use_direct_pattern_extraction": true
+  //   }
+  // },
+  // {
+  //   "name": "llama3.1:8b_gemma3:4b_snowflake-arctic-embed:335m",
+  //   "text": {
+  //     "provider": "ollama",
+  //     "model": "llama3.1:8b"
+  //   },
+  //   "vision": {
+  //     "provider": "ollama",
+  //     "model": "gemma3:4b"
+  //   },
+  //   "embedding": {
+  //     "provider": "ollama",
+  //     "model": "snowflake-arctic-embed:335m"
+  //   },
+  //   "multimodal": {
+  //     "provider": "ollama",
+  //     "model": "gemma3:4b"
+  //   },
+  //   "text_pipeline": {
+  //     "enabled": true,
+  //     "max_text_length": 6000,
+  //     "extract_references": true,
+  //     "use_direct_pattern_extraction": true
+  //   }
+  // },
+  // {
+  //   "name": "phi4:14b_gemma3:12b_snowflake-arctic-embed2:latest",
+  //   "text": {
+  //     "provider": "ollama",
+  //     "model": "phi4:14b"
+  //   },
+  //   "vision": {
+  //     "provider": "ollama",
+  //     "model": "gemma3:12b"
+  //   },
+  //   "embedding": {
+  //     "provider": "ollama",
+  //     "model": "snowflake-arctic-embed2:latest"
+  //   },
+  //   "multimodal": {
+  //     "provider": "ollama",
+  //     "model": "gemma3:12b"
+  //   },
+  //   "text_pipeline": {
+  //     "enabled": true,
+  //     "max_text_length": 6000,
+  //     "extract_references": true,
+  //     "use_direct_pattern_extraction": true
+  //   }
+  // },
+  // {
+  //   "name": "phi4:14b_llama3.2-vision:11b_paraphrase-multilingual:latest",
+  //   "text": {
+  //     "provider": "ollama",
+  //     "model": "phi4:14b"
+  //   },
+  //   "vision": {
+  //     "provider": "ollama",
+  //     "model": "llama3.2-vision:11b"
+  //   },
+  //   "embedding": {
+  //     "provider": "ollama",
+  //     "model": "paraphrase-multilingual:latest"
+  //   },
+  //   "multimodal": {
+  //     "provider": "ollama",
+  //     "model": "llama3.2-vision:11b"
+  //   },
+  //   "text_pipeline": {
+  //     "enabled": true,
+  //     "max_text_length": 6000,
+  //     "extract_references": true,
+  //     "use_direct_pattern_extraction": true
+  //   }
+  // },
+  // {
+  //   "name": "multimodal-llama",
+  //   "text": {
+  //     "provider": "ollama",
+  //     "model": "llama3:8b"
+  //   },
+  //   "vision": {
+  //     "provider": "ollama",
+  //     "model": "llama3.2-vision:11b"
+  //   },
+  //   "embedding": {
+  //     "provider": "ollama",
+  //     "model": "nomic-embed-text:latest"
+  //   },
+  //   "multimodal": {
+  //     "provider": "ollama",
+  //     "model": "llama3.2-vision:11b"
+  //   },
+  //   "text_pipeline": {
+  //     "enabled": true,
+  //     "max_text_length": 6000,
+  //     "extract_references": true,
+  //     "use_direct_pattern_extraction": true
+  //   }
+  // },
+  // {
+  //   "name": "multimodal-openai",
+  //   "text": {
+  //     "provider": "openai",
+  //     "model": "gpt-3.5-turbo"
+  //   },
+  //   "vision": {
+  //     "provider": "openai",
+  //     "model": "gpt-4o"
+  //   },
+  //   "embedding": {
+  //     "provider": "openai",
+  //     "model": "text-embedding-3-small"
+  //   },
+  //   "multimodal": {
+  //     "provider": "openai",
+  //     "model": "gpt-4o"
+  //   },
+  //   "text_pipeline": {
+  //     "enabled": true,
+  //     "max_text_length": 6000,
+  //     "extract_references": true,
+  //     "use_direct_pattern_extraction": true
+  //   }
+  // }
 ] 

@@ -6,7 +6,7 @@ Modul obsahující základní abstraktní třídy pro poskytovatele AI modelů.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from PIL import Image
 
 
@@ -130,5 +130,62 @@ class EmbeddingModelProvider(ABC):
         
         Returns:
             Seznam názvů dostupných modelů
+        """
+        pass
+
+
+class MultimodalModelProvider(ABC):
+    """
+    Základní abstraktní třída pro poskytovatele multimodálních modelů.
+    Implementuje rozhraní pro komunikaci s multimodálními modely.
+    """
+    
+    # Seznam dostupných modelů
+    AVAILABLE_MODELS = []
+    
+    def __init__(self, model_name: Optional[str] = None):
+        """
+        Inicializace poskytovatele multimodálního modelu.
+        
+        Args:
+            model_name: Název modelu
+        """
+        self.api_key = None
+        self.model_name = model_name or self.get_default_model()
+        self.client = None
+    
+    @classmethod
+    def get_default_model(cls) -> str:
+        """
+        Získá výchozí model.
+        
+        Returns:
+            Název výchozího modelu
+        """
+        return cls.AVAILABLE_MODELS[0] if cls.AVAILABLE_MODELS else "default"
+    
+    @abstractmethod
+    def initialize(self, api_key: Optional[str] = None, **kwargs) -> None:
+        """
+        Inicializuje poskytovatele.
+        
+        Args:
+            api_key: API klíč
+            **kwargs: Další parametry pro inicializaci
+        """
+        pass
+    
+    @abstractmethod
+    def generate_text_from_image_and_text(self, image: Image.Image, text: str, prompt: str) -> tuple[str, Dict[str, int]]:
+        """
+        Generuje text na základě obrázku, textu a promptu.
+        
+        Args:
+            image: Obrázek
+            text: Doplňující text
+            prompt: Dotaz/prompt pro model
+            
+        Returns:
+            tuple: Vygenerovaný text a slovník s použitými tokeny
         """
         pass 

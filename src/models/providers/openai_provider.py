@@ -9,10 +9,17 @@ import os
 import base64
 from io import BytesIO
 import requests
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from PIL import Image
 
-from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingModelProvider
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    print("VAROVÁNÍ: Knihovna openai není k dispozici. OpenAI provider nebude dostupný.")
+
+from ..base.provider import TextModelProvider, VisionModelProvider, EmbeddingModelProvider, MultimodalModelProvider
 
 
 class OpenAITextModelProvider(TextModelProvider):
@@ -396,3 +403,97 @@ class OpenAIEmbeddingModelProvider(EmbeddingModelProvider):
             Seznam názvů dostupných modelů
         """
         return self.AVAILABLE_MODELS 
+
+
+class OpenAIMultimodalModelProvider(MultimodalModelProvider):
+    """
+    Poskytovatel multimodálních modelů OpenAI.
+    """
+    
+    # Seznam dostupných modelů
+    AVAILABLE_MODELS = [
+        "gpt-4o",
+        "gpt-4-vision-preview"
+    ]
+    
+    def initialize(self, api_key: Optional[str] = None, **kwargs) -> None:
+        """
+        Inicializuje poskytovatele.
+        
+        Args:
+            api_key: API klíč pro OpenAI
+            **kwargs: Další parametry pro inicializaci
+        """
+        if not OPENAI_AVAILABLE:
+            raise ImportError("Knihovna openai není nainstalována. Nainstalujte ji pomocí příkazu: pip install openai")
+        
+        # Použití API klíče z parametru nebo prostředí
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        
+        if not self.api_key:
+            raise ValueError("API klíč pro OpenAI není zadán. Zadejte ho jako parametr nebo nastavte proměnnou prostředí OPENAI_API_KEY.")
+        
+        # Inicializace klienta
+        self.client = OpenAI(api_key=self.api_key)
+    
+    def generate_text_from_image_and_text(self, image: Image.Image, text: str, prompt: str) -> tuple[str, Dict[str, int]]:
+        """
+        Generuje text na základě obrázku, textu a promptu.
+        
+        Args:
+            image: Obrázek
+            text: Doplňující text
+            prompt: Dotaz/prompt pro model
+            
+        Returns:
+            tuple: Vygenerovaný text a slovník s použitými tokeny
+        """
+        if not self.client:
+            self.initialize()
+        
+        # Převod obrázku na Base64
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        
+        # Sestavení zprávy s obrázkem a textem
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Otázka: {prompt}\n\nExtrahovaný text z dokumentu: {text}"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_base64}"
+                        }
+                    }
+                ]
+            }
+        ]
+        
+        # Volání API
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                max_tokens=500
+            )
+            
+            # Extrakce odpovědi
+            text_result = response.choices[0].message.content
+            
+            # Vytvoření slovníku s tokeny
+            token_usage = {
+                "input_tokens": response.usage.prompt_tokens,
+                "output_tokens": response.usage.completion_tokens
+            }
+            
+            return text_result, token_usage
+            
+        except Exception as e:
+            print(f"Chyba při generování textu z obrázku a textu pomocí OpenAI: {e}")
+            return "", {"input_tokens": 0, "output_tokens": 0} 

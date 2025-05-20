@@ -1037,72 +1037,143 @@ def load_json_with_nan_handling(file_path):
             return {"comparison": {}, "metrics": {}}
 
 
-def process_comparison_files(output_dir: Path, vlm_comparison_path: Optional[str] = None, embedded_comparison_path: Optional[str] = None, text_comparison_path: Optional[str] = None, hybrid_comparison_path: Optional[str] = None):
+def process_comparison_files(output_dir: Path, vlm_comparison_path: Optional[str] = None, embedded_comparison_path: Optional[str] = None, text_comparison_path: Optional[str] = None, hybrid_comparison_path: Optional[str] = None, multimodal_comparison_path: Optional[str] = None):
     """
-    Zpracuje soubory s porovnáním a vytvoří sémanticky vylepšené porovnání.
+    Zpracuje soubory s porovnáním a vytvoří sémantické porovnání.
     
     Args:
-        output_dir (Path): Adresář, kam se uloží sémantické výsledky.
-        vlm_comparison_path (str, optional): Cesta k souboru vlm_comparison.json
-        embedded_comparison_path (str, optional): Cesta k souboru embedded_comparison.json
-        text_comparison_path (str, optional): Cesta k souboru text_comparison.json
-        hybrid_comparison_path (str, optional): Cesta k souboru hybrid_comparison.json
-        
-    Returns:
-        dict: Slovník s aktualizovanými daty pro každý zpracovaný model.
-              Např. {"vlm": vlm_updated_data, "embedded": embedded_updated_data}
+        output_dir (Path): Adresář pro výstupní soubory
+        vlm_comparison_path (str, optional): Cesta k souboru s porovnáním VLM
+        embedded_comparison_path (str, optional): Cesta k souboru s porovnáním Embedded
+        text_comparison_path (str, optional): Cesta k souboru s porovnáním Text
+        hybrid_comparison_path (str, optional): Cesta k souboru s porovnáním Hybrid
+        multimodal_comparison_path (str, optional): Cesta k souboru s porovnáním Multimodal
     """
-    updated_results = {}
-    processed_files = 0
-
-    # Mapa typů modelů na cesty k souborům
-    model_paths = {
-        "vlm": vlm_comparison_path,
-        "embedded": embedded_comparison_path,
-        "text": text_comparison_path,
-        "hybrid": hybrid_comparison_path
+    # Vytvoření adresáře pro výstupní soubory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Souhrn výsledků
+    results_summary = {
+        "EMBEDDED": None,
+        "VLM": None,
+        "TEXT": None,
+        "HYBRID": None,
+        "MULTIMODAL": None  # Přidáno
     }
-
-    for model_type, file_path in model_paths.items():
-        if file_path and Path(file_path).exists():
-            print(f"\nZpracování {model_type.upper()} dat z {file_path}...")
-            full_data = load_json_with_nan_handling(file_path)
-            
-            # Správné odsazení pro processed_files
-            processed_files += 1 
-
-            if full_data and isinstance(full_data, dict) and "comparison" in full_data:
-                comparison_part = full_data["comparison"]
-                updated_comparison_part = semantic_compare_and_update(comparison_part)
-                full_data["comparison"] = updated_comparison_part
-                full_data = update_overall_metrics(full_data)
-                
-                output_path = output_dir / f"{Path(file_path).stem}_semantic.json"
-                try:
-                    with open(output_path, 'w', encoding='utf-8') as f:
-                        json.dump(full_data, f, ensure_ascii=False, indent=2, default=lambda x: None if pd.isna(x) else x)
-                    print(f"Aktualizovaná {model_type.upper()} data uložena do: {output_path}")
-                    updated_results[model_type] = full_data
-                except Exception as e:
-                     print(f"CHYBA při ukládání {output_path}: {e}")
-
-            elif not full_data:
-                 print(f"Nepodařilo se načíst data z {file_path}")
-            elif "comparison" not in full_data:
-                 print(f"Chyba: Klíč 'comparison' nenalezen v souboru {file_path}. Přeskakuji sémantické porovnání.")
-                 updated_results[model_type] = full_data
-                 
-        else:
-            if file_path:
-                 print(f"Soubor {file_path} neexistuje nebo není dostupný.")
-
-    if processed_files == 0:
-        print("\nNebyly zpracovány žádné soubory pro sémantické porovnání.")
+    
+    # Zpracování souboru s porovnáním VLM
+    if vlm_comparison_path:
+        vlm_path = vlm_comparison_path
     else:
-        print(f"\nSémantické porovnání dokončeno pro {processed_files} soubor(ů).")
-
-    # Vracíme slovník s aktualizovanými daty
-    return updated_results
+        vlm_path = output_dir / "vlm_comparison.json"
+    
+    if os.path.exists(vlm_path):
+        print(f"Zpracovávám VLM porovnání: {vlm_path}")
+        vlm_comparison = load_json_with_nan_handling(vlm_path)
+        vlm_semantic = semantic_compare_and_update(vlm_comparison)
+        # Výpočet metrik a aktualizace
+        vlm_semantic = update_overall_metrics(vlm_semantic)
+        
+        # Uložení výsledků
+        vlm_output_path = output_dir / "vlm_comparison_semantic.json"
+        with open(vlm_output_path, 'w', encoding='utf-8') as f:
+            json.dump(vlm_semantic, f, ensure_ascii=False, indent=2)
+        
+        # Přidání do souhrnu
+        results_summary["VLM"] = vlm_semantic
+    
+    # Zpracování souboru s porovnáním Embedded
+    if embedded_comparison_path:
+        embedded_path = embedded_comparison_path
+    else:
+        embedded_path = output_dir / "embedded_comparison.json"
+    
+    if os.path.exists(embedded_path):
+        print(f"Zpracovávám Embedded porovnání: {embedded_path}")
+        embedded_comparison = load_json_with_nan_handling(embedded_path)
+        embedded_semantic = semantic_compare_and_update(embedded_comparison)
+        # Výpočet metrik a aktualizace
+        embedded_semantic = update_overall_metrics(embedded_semantic)
+        
+        # Uložení výsledků
+        embedded_output_path = output_dir / "embedded_comparison_semantic.json"
+        with open(embedded_output_path, 'w', encoding='utf-8') as f:
+            json.dump(embedded_semantic, f, ensure_ascii=False, indent=2)
+        
+        # Přidání do souhrnu
+        results_summary["EMBEDDED"] = embedded_semantic
+    
+    # Zpracování souboru s porovnáním Text
+    if text_comparison_path:
+        text_path = text_comparison_path
+    else:
+        text_path = output_dir / "text_comparison.json"
+    
+    if os.path.exists(text_path):
+        print(f"Zpracovávám Text porovnání: {text_path}")
+        text_comparison = load_json_with_nan_handling(text_path)
+        text_semantic = semantic_compare_and_update(text_comparison)
+        # Výpočet metrik a aktualizace
+        text_semantic = update_overall_metrics(text_semantic)
+        
+        # Uložení výsledků
+        text_output_path = output_dir / "text_comparison_semantic.json"
+        with open(text_output_path, 'w', encoding='utf-8') as f:
+            json.dump(text_semantic, f, ensure_ascii=False, indent=2)
+        
+        # Přidání do souhrnu
+        results_summary["TEXT"] = text_semantic
+    
+    # Zpracování souboru s porovnáním Hybrid
+    if hybrid_comparison_path:
+        hybrid_path = hybrid_comparison_path
+    else:
+        hybrid_path = output_dir / "hybrid_comparison.json"
+    
+    if os.path.exists(hybrid_path):
+        print(f"Zpracovávám Hybrid porovnání: {hybrid_path}")
+        hybrid_comparison = load_json_with_nan_handling(hybrid_path)
+        hybrid_semantic = semantic_compare_and_update(hybrid_comparison)
+        # Výpočet metrik a aktualizace
+        hybrid_semantic = update_overall_metrics(hybrid_semantic)
+        
+        # Uložení výsledků
+        hybrid_output_path = output_dir / "hybrid_comparison_semantic.json"
+        with open(hybrid_output_path, 'w', encoding='utf-8') as f:
+            json.dump(hybrid_semantic, f, ensure_ascii=False, indent=2)
+        
+        # Přidání do souhrnu
+        results_summary["HYBRID"] = hybrid_semantic
+    
+    # Zpracování souboru s porovnáním Multimodal
+    if multimodal_comparison_path:
+        multimodal_path = multimodal_comparison_path
+    else:
+        multimodal_path = output_dir / "multimodal_comparison.json"
+    
+    if os.path.exists(multimodal_path):
+        print(f"Zpracovávám Multimodal porovnání: {multimodal_path}")
+        multimodal_comparison = load_json_with_nan_handling(multimodal_path)
+        multimodal_semantic = semantic_compare_and_update(multimodal_comparison)
+        # Výpočet metrik a aktualizace
+        multimodal_semantic = update_overall_metrics(multimodal_semantic)
+        
+        # Uložení výsledků
+        multimodal_output_path = output_dir / "multimodal_comparison_semantic.json"
+        with open(multimodal_output_path, 'w', encoding='utf-8') as f:
+            json.dump(multimodal_semantic, f, ensure_ascii=False, indent=2)
+        
+        # Přidání do souhrnu
+        results_summary["MULTIMODAL"] = multimodal_semantic
+    
+    # Uložení souhrnu výsledků
+    summary_output_path = output_dir / "semantic_comparison_summary.json"
+    with open(summary_output_path, 'w', encoding='utf-8') as f:
+        json.dump(results_summary, f, ensure_ascii=False, indent=2)
+    
+    print(f"Sémantické porovnání dokončeno. Výsledky uloženy do {output_dir}")
+    
+    return results_summary
 
 
 if __name__ == "__main__":
@@ -1111,6 +1182,7 @@ if __name__ == "__main__":
     embedded_comparison_path = RESULTS_DIR / "embedded_comparison.json"
     text_comparison_path = RESULTS_DIR / "text_comparison.json"
     hybrid_comparison_path = RESULTS_DIR / "hybrid_comparison.json"
+    multimodal_comparison_path = RESULTS_DIR / "multimodal_comparison.json"
     output_dir = RESULTS_DIR / "semantic_output"
     output_dir.mkdir(exist_ok=True)
     
@@ -1120,6 +1192,7 @@ if __name__ == "__main__":
         vlm_comparison_path=str(vlm_comparison_path),
         embedded_comparison_path=str(embedded_comparison_path),
         text_comparison_path=str(text_comparison_path),
-        hybrid_comparison_path=str(hybrid_comparison_path)
+        hybrid_comparison_path=str(hybrid_comparison_path),
+        multimodal_comparison_path=str(multimodal_comparison_path)
     )
     print("Příklad použití dokončen.") 

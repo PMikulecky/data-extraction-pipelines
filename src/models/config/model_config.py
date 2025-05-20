@@ -30,6 +30,10 @@ class ModelConfig:
             "provider": "openai",
             "model": "text-embedding-3-small"
         },
+        "multimodal": {
+            "provider": "openai",
+            "model": "gpt-4o"
+        },
         "text_pipeline": {
             "enabled": True,
             "max_text_length": 6000,
@@ -128,6 +132,15 @@ class ModelConfig:
         """
         return self.config.get("embedding", self.DEFAULT_CONFIG["embedding"])
     
+    def get_multimodal_config(self) -> Dict[str, Any]:
+        """
+        Získá konfiguraci pro multimodální modely.
+        
+        Returns:
+            Konfigurace pro multimodální modely
+        """
+        return self.config.get("multimodal", self.DEFAULT_CONFIG["multimodal"])
+    
     def set_text_config(self, provider: str, model: str) -> None:
         """
         Nastaví konfiguraci pro textové modely.
@@ -194,6 +207,19 @@ class ModelConfig:
             "use_direct_pattern_extraction": use_direct_pattern_extraction
         }
     
+    def set_multimodal_config(self, provider: str, model: str) -> None:
+        """
+        Nastaví konfiguraci pro multimodální modely.
+        
+        Args:
+            provider: Název poskytovatele
+            model: Název modelu
+        """
+        self.config["multimodal"] = {
+            "provider": provider,
+            "model": model
+        }
+    
     def get_available_providers(self) -> Dict[str, List[str]]:
         """
         Získá seznam dostupných poskytovatelů pro jednotlivé typy modelů.
@@ -206,7 +232,8 @@ class ModelConfig:
         return {
             "text": list(ModelProviderFactory.TEXT_PROVIDERS.keys()),
             "vision": list(ModelProviderFactory.VISION_PROVIDERS.keys()),
-            "embedding": list(ModelProviderFactory.EMBEDDING_PROVIDERS.keys())
+            "embedding": list(ModelProviderFactory.EMBEDDING_PROVIDERS.keys()),
+            "multimodal": list(ModelProviderFactory.MULTIMODAL_PROVIDERS.keys()) if hasattr(ModelProviderFactory, 'MULTIMODAL_PROVIDERS') else []
         }
     
     def get_available_models(self, provider_name: str, model_type: str) -> List[str]:
@@ -215,7 +242,7 @@ class ModelConfig:
         
         Args:
             provider_name: Název poskytovatele
-            model_type: Typ modelu (text, vision, embedding)
+            model_type: Typ modelu (text, vision, embedding, multimodal)
             
         Returns:
             Seznam dostupných modelů
@@ -246,8 +273,18 @@ class ModelConfig:
             provider_class = ModelProviderFactory.EMBEDDING_PROVIDERS[provider_name]
             return provider_class.AVAILABLE_MODELS
         
+        elif model_type == "multimodal":
+            if not hasattr(ModelProviderFactory, 'MULTIMODAL_PROVIDERS'):
+                raise ValueError("Multimodální modely nejsou v aktuální verzi podporovány.")
+                
+            if provider_name not in ModelProviderFactory.MULTIMODAL_PROVIDERS:
+                raise ValueError(f"Poskytovatel '{provider_name}' není podporován pro multimodální modely.")
+            
+            provider_class = ModelProviderFactory.MULTIMODAL_PROVIDERS[provider_name]
+            return provider_class.AVAILABLE_MODELS
+        
         else:
-            raise ValueError(f"Neplatný typ modelu: {model_type}. Podporované typy: text, vision, embedding.")
+            raise ValueError(f"Neplatný typ modelu: {model_type}. Podporované typy: text, vision, embedding, multimodal.")
 
 
 # Globální instance konfigurace
