@@ -39,8 +39,8 @@ class TextPipeline:
         'volume',          # Ročník
         'issue',           # Číslo
         'pages',           # Stránky
-        'publisher',       # Vydavatel
-        'references'       # Seznam referencí
+        'publisher'        # Vydavatel
+        # 'references'     # Seznam referencí - vyřazeno z extrakce
     ]
     
     # Šablony dotazů pro extrakci metadat

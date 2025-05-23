@@ -22,6 +22,9 @@ from src.models.providers.factory import ModelProviderFactory
 from src.models.config.model_config import get_config
 from src.config.runtime_config import get_run_results_dir
 
+# Import PDFAnalyzer
+from src.utils.pdf_analyzer import PDFAnalyzer
+
 from dotenv import load_dotenv
 
 # Načtení proměnných prostředí
@@ -56,8 +59,8 @@ class EmbeddedPipeline:
         'volume',          # Ročník
         'issue',           # Číslo
         'pages',           # Stránky
-        'publisher',       # Vydavatel
-        'references'       # Seznam referencí
+        'publisher'        # Vydavatel
+        # 'references'     # Seznam referencí - vyřazeno z extrakce
     ]
     
     # Šablony dotazů pro extrakci metadat
@@ -76,7 +79,7 @@ class EmbeddedPipeline:
         'references': "Uveď seznam referencí citovaných v této akademické práci. Vrať pouze seznam referencí bez jakéhokoliv dalšího textu."
     }
     
-    def __init__(self, model_name=None, chunk_size=1000, chunk_overlap=200, provider_name=None, api_key=None, embedding_model_name=None, embedding_provider_name=None, vectorstore_path=None, text_api_key=None, embedding_api_key=None):
+    def __init__(self, model_name=None, chunk_size=1000, chunk_overlap=200, provider_name=None, api_key=None, embedding_model_name=None, embedding_provider_name=None, vectorstore_path=None, text_api_key=None, embedding_api_key=None, exclude_references=True):
         """
         Inicializace Embedded pipeline.
         
@@ -91,6 +94,7 @@ class EmbeddedPipeline:
             vectorstore_path (str, optional): Cesta k adresáři pro vectorstore
             text_api_key (str, optional): API klíč pro textový model
             embedding_api_key (str, optional): API klíč pro embedding model
+            exclude_references (bool): Zda vyloučit reference z textu pro vytvoření vectorstore (výchozí: True)
         """
         # Načtení konfigurace
         config = get_config()
@@ -108,6 +112,7 @@ class EmbeddedPipeline:
         self.vectorstore_path = vectorstore_path or str(VECTORSTORE_DIR / "embedded_pipeline")
         self.text_api_key = text_api_key
         self.embedding_api_key = embedding_api_key
+        self.exclude_references = exclude_references
         
         # Inicializace komponent
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -135,31 +140,58 @@ class EmbeddedPipeline:
         
         print(f"Inicializován textový model: {self.model_name} od poskytovatele: {self.provider_name}")
         print(f"Inicializován embedding model: {self.embedding_model_name} od poskytovatele: {self.embedding_provider_name}")
+        print(f"Vyloučení referencí z textu pro vectorstore: {self.exclude_references}")
     
     def extract_text_from_pdf(self, pdf_path):
         """
-        Extrahuje text z PDF souboru.
+        Extrahuje text z PDF souboru bez referencí pomocí PDFAnalyzer.
         
         Args:
             pdf_path (str): Cesta k PDF souboru
             
         Returns:
-            str: Extrahovaný text
+            str: Extrahovaný text bez referencí
         """
         try:
-            with open(pdf_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
-                text = ""
-                
-                for page in reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n\n"
-                
-                return text
+            # Použití PDFAnalyzer pro analýzu struktury dokumentu
+            analyzer = PDFAnalyzer(pdf_path)
+            analyzer.analyze()
+            
+            # Získání titulní strany
+            title_page_text = analyzer.get_title_page_text()
+            
+            # Získání hlavního textu (bez referencí)
+            main_text = analyzer.get_main_text()
+            
+            # Získání abstraktu
+            abstract_text = analyzer.get_abstract_text()
+            
+            # Kombinace titulní strany, abstraktu a hlavního textu
+            combined_text = f"{title_page_text}\n\n{abstract_text}\n\n{main_text}"
+            
+            print(f"Extrahován text z {pdf_path}: {len(combined_text)} znaků bez referencí.")
+            
+            return combined_text
         except Exception as e:
-            print(f"Chyba při extrakci textu z PDF souboru {pdf_path}: {e}")
-            return ""
+            print(f"Chyba při extrakci textu z PDF souboru {pdf_path} pomocí PDFAnalyzer: {e}")
+            # Fallback na původní metodu v případě chyby
+            print("Zkouším původní metodu extrakce textu...")
+            
+            try:
+                with open(pdf_path, 'rb') as file:
+                    reader = PyPDF2.PdfReader(file)
+                    text = ""
+                    
+                    for page in reader.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n\n"
+                    
+                    print(f"Extrahován text původní metodou: {len(text)} znaků.")
+                    return text
+            except Exception as e2:
+                print(f"Chyba i při původní metodě extrakce textu z PDF souboru {pdf_path}: {e2}")
+                return ""
     
     def create_document_chunks(self, text, metadata=None):
         """
@@ -344,7 +376,7 @@ class EmbeddedPipeline:
 
         try:
             # Extrakce textu
-            full_text = self.extract_text_from_pdf(pdf_path)
+            full_text = self.extract_text_from_pdf(pdf_path) if self.exclude_references else self._extract_full_text_from_pdf(pdf_path)
             if not full_text:
                 print(f"Nepodařilo se extrahovat text z {pdf_path}")
                 duration = time.perf_counter() - start_time
@@ -419,6 +451,33 @@ class EmbeddedPipeline:
                  except Exception as cleanup_e:
                       print(f"Chyba při mazání vectorstore {doc_vectorstore_path}: {cleanup_e}")
 
+    def _extract_full_text_from_pdf(self, pdf_path):
+        """
+        Extrahuje kompletní text z PDF souboru pomocí PyPDF2.
+        Tato metoda je zachována pro kompatibilitu a případy, kdy chceme zahrnout i reference.
+        
+        Args:
+            pdf_path (str): Cesta k PDF souboru
+            
+        Returns:
+            str: Kompletní extrahovaný text
+        """
+        try:
+            with open(pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                text = ""
+                
+                for page in reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n\n"
+                
+                print(f"Extrahován kompletní text pomocí PyPDF2: {len(text)} znaků.")
+                return text
+        except Exception as e:
+            print(f"Chyba při extrakci textu z PDF souboru {pdf_path}: {e}")
+            return ""
+
     def extract_metadata_batch(self, pdf_paths, limit=None) -> tuple[dict, dict, dict]: # Změna návratového typu
         """
         Extrahuje metadata z dávky PDF souborů.
@@ -453,7 +512,7 @@ class EmbeddedPipeline:
         return results, timings, token_usages # Vrátit i tokeny
 
 
-def extract_metadata_from_pdfs(pdf_dir, limit=None, provider_name=None, force_extraction=False, embedding_model_name=None, embedding_provider_name=None, model_name=None, vectorstore_path=None, text_api_key=None, embedding_api_key=None) -> tuple[dict, dict, dict]: # Změna návratového typu
+def extract_metadata_from_pdfs(pdf_dir, limit=None, provider_name=None, force_extraction=False, embedding_model_name=None, embedding_provider_name=None, model_name=None, vectorstore_path=None, text_api_key=None, embedding_api_key=None, exclude_references=True) -> tuple[dict, dict, dict]: # Změna návratového typu
     """
     Extrahuje metadata z PDF souborů v daném adresáři pomocí Embedded pipeline.
     
@@ -468,6 +527,7 @@ def extract_metadata_from_pdfs(pdf_dir, limit=None, provider_name=None, force_ex
         vectorstore_path (str, optional): Cesta k adresáři pro vectorstore
         text_api_key (str, optional): API klíč pro textový model
         embedding_api_key (str, optional): API klíč pro embedding model
+        exclude_references (bool): Zda vyloučit reference z textu pro vytvoření vectorstore (výchozí: True)
         
     Returns:
         tuple: Slovník s metadaty, slovník s časy, slovník s token usage
@@ -499,7 +559,8 @@ def extract_metadata_from_pdfs(pdf_dir, limit=None, provider_name=None, force_ex
         embedding_provider_name=embedding_provider_name,
         vectorstore_path=vectorstore_path, # Předání cesty
         text_api_key=text_api_key,
-        embedding_api_key=embedding_api_key
+        embedding_api_key=embedding_api_key,
+        exclude_references=exclude_references # Předání parametru pro vyloučení referencí
     )
     
     pdf_files = [os.path.join(pdf_dir, f) for f in os.listdir(pdf_dir) if f.endswith('.pdf')]

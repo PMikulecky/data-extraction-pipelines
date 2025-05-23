@@ -183,28 +183,6 @@ def sanitize_filename(name: str) -> str:
     return sanitized or "default_name"
 
 
-def prepare_result_directory(config_name: str) -> str:
-    """
-    Připraví adresář pro výsledky dané konfigurace v rámci hlavního adresáře běhu.
-    
-    Args:
-        config_name (str): Název konfigurace
-        
-    Returns:
-        str: Cesta k adresáři s výsledky pro danou konfiguraci
-    """
-    main_run_dir = Path(get_run_results_dir()) # Získáme hlavní adresář běhu run_all_models
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # <<< Změna: Sanitizace názvu konfigurace >>>
-    sanitized_config_name = sanitize_filename(config_name)
-    # Název adresáře bude obsahovat sanitizovaný název konfigurace a časové razítko
-    result_dir_path = main_run_dir / f"{sanitized_config_name}_{timestamp}"
-    # <<< Konec změny >>>
-    result_dir_path.mkdir(parents=True, exist_ok=True)
-    print(f"Adresář pro výsledky konfigurace '{config_name}': {result_dir_path}")
-    return str(result_dir_path)
-
-
 def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str]) -> str | None:
     """
     Spustí extrakci metadat s danou konfigurací.
@@ -218,15 +196,43 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
         str | None: Adresář s výsledky extrakce nebo None, pokud extrakce selhala
     """
     try:
+        # <<< Změna: Získáme hlavní adresář běhu před nastavením adresáře konfigurace >>>
+        main_run_dir = Path(get_run_results_dir())  # Hlavní adresář, který obsahuje všechny konfigurace
+        
         # Připrava adresáře pro výsledky této konfigurace
         config_name = config.get("name", "unnamed-config")
-        result_dir = prepare_result_directory(config_name)
+        sanitized_config_name = sanitize_filename(config_name)
+        
+        # <<< Změna: Vytvoříme adresář pro konfiguraci přímo v hlavním adresáři >>>
+        result_dir_path = main_run_dir / sanitized_config_name
+        result_dir_path.mkdir(parents=True, exist_ok=True)
+        result_dir = str(result_dir_path)
+        
+        print(f"Adresář pro výsledky konfigurace '{config_name}': {result_dir}")
         
         # Nastavení adresáře pro výsledky této konfigurace
         set_run_results_dir(result_dir)
         
-        # Uložení dočasné konfigurace pro tuto extrakci
-        save_temp_config(config)
+        # Uložení konfigurace přímo do adresáře výsledků této konfigurace
+        config_file_path = result_dir_path / "config.json"
+        config_to_save = {k: v for k, v in config.items() if k != "name"}
+        
+        try:
+            with open(config_file_path, 'w', encoding='utf-8') as f:
+                json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+            print(f"Konfigurace uložena do {config_file_path}")
+        except Exception as e:
+            print(f"Chyba při ukládání konfigurace: {e}")
+            return None
+        
+        # Ihned po vytvoření konfigurace uložíme správnou konfiguraci do used_config.json
+        try:
+            used_config_path = result_dir_path / "used_config.json"
+            with open(used_config_path, 'w', encoding='utf-8') as f:
+                json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+            print(f"Uložena správná konfigurace do {used_config_path}")
+        except Exception as e:
+            print(f"Varování: Chyba při předběžném ukládání used_config.json: {e}")
         
         # Sestavení argumentů pro main.py
         main_args = [
@@ -238,26 +244,26 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
         # Přidání modelů, které mají být použity
         models_to_use = []
         
-        if "embedded" in args.models or args.models is None:
+        if args.models is None or "embedded" in args.models:
             embedding_model = config.get("embedding", {})
             if embedding_model and embedding_model.get("provider") and embedding_model.get("model"):
                 models_to_use.append("embedded")
                 processed_models.setdefault("EMBEDDED", []).append(result_dir)
         
-        if "vlm" in args.models or args.models is None:
+        if args.models is None or "vlm" in args.models:
             vision_model = config.get("vision", {})
             if vision_model and vision_model.get("provider") and vision_model.get("model"):
                 models_to_use.append("vlm")
                 processed_models.setdefault("VLM", []).append(result_dir)
         
-        if "text" in args.models or args.models is None:
+        if args.models is None or "text" in args.models:
             text_model = config.get("text", {})
             if text_model and text_model.get("provider") and text_model.get("model"):
                 models_to_use.append("text")
                 processed_models.setdefault("TEXT", []).append(result_dir)
         
-        # Přidání multimodální pipeline, pokud je vybrána
-        if "multimodal" in args.models:
+        # Přidání multimodální pipeline, pokud je vybrána nebo pokud není zadán žádný model
+        if args.models is None or "multimodal" in args.models:
             multimodal_model = config.get("multimodal", {})
             if multimodal_model and multimodal_model.get("provider") and multimodal_model.get("model"):
                 models_to_use.append("multimodal")
@@ -292,7 +298,7 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
             main_args.append("--verbose")
         
         # Přidání cesty ke konfiguraci
-        main_args.extend(["--config", str(TEMP_CONFIG_FILE)])
+        main_args.extend(["--config", str(config_file_path)])
         
         # Přidání cesty k výstupnímu adresáři
         main_args.extend(["--output-dir", result_dir])
@@ -303,6 +309,21 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
         
         result = subprocess.run(main_args, check=True)
         
+        # Po úspěšném dokončení extrakce uložíme správnou konfiguraci do used_config.json
+        if result.returncode == 0:
+            try:
+                used_config_path = result_dir_path / "used_config.json"
+                config_to_save = {k: v for k, v in config.items() if k != "name"}
+                with open(used_config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config_to_save, f, ensure_ascii=False, indent=2)
+                print(f"Uložena správná konfigurace do {used_config_path}")
+            except Exception as e:
+                print(f"Varování: Chyba při ukládání used_config.json: {e}")
+        
+        # <<< Změna: Po dokončení extrakce obnovíme hlavní adresář jako aktuální >>>
+        # Vrátíme hlavní adresář jako výchozí pro další běh
+        set_run_results_dir(main_run_dir)
+        
         if result.returncode == 0:
             print(f"Extrakce úspěšně dokončena pro konfiguraci: {config_name}")
             return result_dir
@@ -312,166 +333,77 @@ def run_extraction(config: Dict[str, Any], args, processed_models: Dict[str, str
             
     except Exception as e:
         print(f"Chyba při spouštění extrakce: {e}")
+        # <<< Změna: Zajistíme, že hlavní adresář je obnoven i v případě chyby >>>
+        main_run_dir = Path(get_run_results_dir()).parent
+        if "all_models_" in str(main_run_dir):
+            set_run_results_dir(main_run_dir)
         return None
 
 
 def combine_pipeline_results(result_dir: str) -> None:
     """
-    Vytvoří hybridní pipeline kombinací výsledků z Text a VLM pipeline.
+    Vytvoří hybridní pipeline kombinací výsledků z Text a VLM pipeline pomocí dynamického přístupu.
     
     Args:
         result_dir (str): Cesta k adresáři s výsledky
     """
-    print(f"\n=== Kombinuji výsledky Text a VLM pipeline v adresáři: {result_dir} ===")
+    # Import Path na začátku funkce
+    from pathlib import Path
+    
+    print(f"\n=== Kombinuji výsledky Text a VLM pipeline v adresáři: {result_dir} (DYNAMICKÝ HYBRID) ===")
     
     result_dir_path = Path(result_dir)
     
-    # Načtení výsledků Text pipeline
+    # Kontrola existence potřebných souborů
     text_results_path = result_dir_path / "text_results.json"
-    if not text_results_path.exists():
-        print(f"Soubor s výsledky Text pipeline ({text_results_path}) neexistuje.")
-        return
-    
-    try:
-        with open(text_results_path, 'r', encoding='utf-8') as f:
-            text_data = json.load(f)
-    except Exception as e:
-        print(f"Chyba při načítání výsledků Text pipeline: {e}")
-        return
-    
-    # Načtení výsledků VLM pipeline
     vlm_results_path = result_dir_path / "vlm_results.json"
-    if not vlm_results_path.exists():
-        print(f"Soubor s výsledky VLM pipeline ({vlm_results_path}) neexistuje.")
+    text_semantic_path = result_dir_path / "text_comparison_semantic.json"
+    vlm_semantic_path = result_dir_path / "vlm_comparison_semantic.json"
+    
+    required_files = [text_results_path, vlm_results_path, text_semantic_path, vlm_semantic_path]
+    missing_files = [str(f) for f in required_files if not f.exists()]
+    
+    if missing_files:
+        print(f"Chybí potřebné soubory pro dynamický hybrid: {', '.join(missing_files)}")
         return
     
+    # Import dynamic hybrid pipeline
     try:
-        with open(vlm_results_path, 'r', encoding='utf-8') as f:
-            vlm_data = json.load(f)
-    except Exception as e:
-        print(f"Chyba při načítání výsledků VLM pipeline: {e}")
+        import sys
+        sys.path.append(str(Path(__file__).parent))
+        from dynamic_hybrid_pipeline import create_dynamic_hybrid_base_results, create_dynamic_hybrid_semantic_results
+    except ImportError as e:
+        print(f"Chyba při importu dynamic_hybrid_pipeline: {e}")
         return
     
-    # Inicializace hybridních výsledků
-    hybrid_results = {
-        "results": [],
-        "timings": {}
-    }
+    # 1. Vytvoření dynamických sémantických výsledků
+    dynamic_semantic_path = result_dir_path / "hybrid_comparison_semantic.json"
+    print("Vytváří dynamické hybridní sémantické výsledky...")
     
-    # Příprava výsledků Text pipeline
-    text_results_by_doi = {}
-    if isinstance(text_data, dict):
-        # Formát: text_data je slovník, kde klíče jsou DOI a hodnoty jsou metadata
-        for doi, item in text_data.items():
-            if isinstance(item, dict) and "doi" in item:
-                text_results_by_doi[item["doi"]] = item
-            else:
-                # Zkusit použít DOI z klíče
-                item_copy = dict(item) if isinstance(item, dict) else {"content": item}
-                item_copy["doi"] = doi
-                text_results_by_doi[doi] = item_copy
-    elif "results" in text_data and isinstance(text_data["results"], list):
-        # Formát: text_data.results je seznam metadat
-        for item in text_data["results"]:
-            if "doi" in item:
-                text_results_by_doi[item["doi"]] = item
-    else:
-        print("Neznámý formát text_results.json, přeskakuji.")
+    semantic_success = create_dynamic_hybrid_semantic_results(
+        text_semantic_path, vlm_semantic_path, dynamic_semantic_path, confidence_threshold=0.05
+    )
+    
+    if not semantic_success:
+        print("Nepodařilo se vytvořit dynamické sémantické výsledky")
         return
     
-    # Příprava výsledků VLM pipeline
-    vlm_results_by_doi = {}
-    if "results" in vlm_data and isinstance(vlm_data["results"], dict):
-        # Formát: vlm_data.results je slovník, kde klíče jsou DOI a hodnoty jsou metadata
-        for doi, item in vlm_data["results"].items():
-            if isinstance(item, dict) and "doi" in item:
-                vlm_results_by_doi[item["doi"]] = item
-            else:
-                # Zkusit použít DOI z klíče
-                item_copy = dict(item) if isinstance(item, dict) else {"content": item}
-                item_copy["doi"] = doi
-                vlm_results_by_doi[doi] = item_copy
-    elif "results" in vlm_data and isinstance(vlm_data["results"], list):
-        # Formát: vlm_data.results je seznam metadat
-        for item in vlm_data["results"]:
-            if "doi" in item:
-                vlm_results_by_doi[item["doi"]] = item
-    else:
-        print("Neznámý formát vlm_results.json, přeskakuji.")
+    # 2. Vytvoření dynamických základních výsledků
+    dynamic_results_path = result_dir_path / "hybrid_results.json"
+    print("Vytváří dynamické hybridní základní výsledky...")
+    
+    base_success = create_dynamic_hybrid_base_results(
+        text_results_path, vlm_results_path, text_semantic_path, vlm_semantic_path,
+        dynamic_results_path, confidence_threshold=0.05
+    )
+    
+    if not base_success:
+        print("Nepodařilo se vytvořit dynamické základní výsledky")
         return
     
-    # Sloučení časů zpracování (součet časů obou pipeline)
-    text_timings = text_data.get("timings", {})
-    vlm_timings = vlm_data.get("timings", {})
+    print("Dynamický hybrid pipeline úspěšně dokončen!")
     
-    if isinstance(text_timings, dict) and isinstance(vlm_timings, dict):
-        # Pokud timings jsou slovníky, počítáme total a average
-        text_total = sum(text_timings.values()) if text_timings else 0
-        vlm_total = sum(vlm_timings.values()) if vlm_timings else 0
-        total_time = text_total + vlm_total
-        avg_time = total_time / 2  # nebo (len(text_timings) + len(vlm_timings)) pokud není 0
-        
-        hybrid_results["timings"] = {
-            "total": total_time,
-            "average": avg_time
-        }
-    else:
-        # Pokud timings mají jiný formát, použijeme text_timings
-        hybrid_results["timings"] = text_timings
-    
-    # Přidáme token_usages, pokud jsou k dispozici
-    if "token_usages" in text_data or "token_usages" in vlm_data:
-        hybrid_results["token_usages"] = {}
-        if "token_usages" in text_data:
-            hybrid_results["token_usages"].update(text_data["token_usages"])
-        if "token_usages" in vlm_data:
-            hybrid_results["token_usages"].update(vlm_data["token_usages"])
-    
-    # Definice metadat, která preferujeme z VLM pipeline
-    vlm_preferred_fields = ["title", "authors", "doi", "issue", "volume", "journal", "publisher", "year"]
-    
-    # Kombinace výsledků
-    processed_dois = set(text_results_by_doi.keys()) | set(vlm_results_by_doi.keys())
-    print(f"Celkem nalezeno {len(processed_dois)} unikátních DOI ke zpracování.")
-    
-    for doi in processed_dois:
-        hybrid_item = {}
-        
-        # Začneme s daty z Text pipeline (pokud existují)
-        if doi in text_results_by_doi:
-            hybrid_item = copy.deepcopy(text_results_by_doi[doi])
-        
-        # Přidáme nebo nahradíme preferovaná pole z VLM pipeline
-        if doi in vlm_results_by_doi:
-            vlm_item = vlm_results_by_doi[doi]
-            
-            for field in vlm_preferred_fields:
-                # Přidáme pole z VLM pouze pokud existuje a není prázdné
-                if field in vlm_item and vlm_item[field] and (field not in hybrid_item or not hybrid_item[field]):
-                    hybrid_item[field] = vlm_item[field]
-            
-            # Pro ostatní pole v VLM, která nejsou v seznamu preferovaných, ale chybí v Text výsledcích
-            for field, value in vlm_item.items():
-                if field not in vlm_preferred_fields and (field not in hybrid_item or not hybrid_item[field]) and value:
-                    hybrid_item[field] = value
-        
-        # Přidání záznamu do hybridních výsledků, pokud má alespoň některá metadata
-        if any(field != "doi" and value for field, value in hybrid_item.items()):
-            hybrid_results["results"].append(hybrid_item)
-    
-    print(f"Vytvořeno {len(hybrid_results['results'])} hybridních záznamů.")
-    
-    # Uložení hybridních výsledků
-    hybrid_results_path = result_dir_path / "hybrid_results.json"
-    try:
-        with open(hybrid_results_path, 'w', encoding='utf-8') as f:
-            json.dump(hybrid_results, f, ensure_ascii=False, indent=2)
-        print(f"Hybridní výsledky byly uloženy do souboru: {hybrid_results_path}")
-    except Exception as e:
-        print(f"Chyba při ukládání hybridních výsledků: {e}")
-        return
-
-    # Spuštění přímého porovnání s referenčními daty pro hybridní pipeline
+    # 3. Spuštění přímého porovnání s referenčními daty pro hybridní pipeline
     cmd_args = [
         sys.executable,
         "-m", "src.main",
@@ -623,324 +555,365 @@ def combine_existing_results(text_model_dir: str, vision_model_dir: str, embeddi
 
 def create_final_comparison(result_dirs: List[str], is_final: bool = False) -> None:
     """
-    Vytvoří souhrnné porovnání všech výsledků.
+    Vytvoří souhrnné grafy a tabulky porovnávající výsledky z různých adresářů.
     
     Args:
         result_dirs (List[str]): Seznam adresářů s výsledky
-        is_final (bool): Zda se jedná o finální porovnání (po dokončení všech extrakcí)
+        is_final (bool): Zda jde o finální kolo porovnání
     """
     if not result_dirs:
-        print("Žádné výsledky k porovnání.")
+        print("Žádné adresáře s výsledky k porovnání.")
         return
     
-    print(f"\n=== {'Finální' if is_final else 'Průběžné'} srovnání všech výsledků ===")
+    # <<< Změna: Zajistíme, že hlavní adresář je dostupný pro všechny konfigurace >>>
+    # Najdeme hlavní adresář, který by měl být rodičem všech adresářů s konfiguracemi
+        # Kontrolujeme všechny adresáře a hledáme společného rodiče obsahujícího "all_models_"
+    main_run_dirs = set()
+    for result_dir in result_dirs:
+        path = Path(result_dir)
+        parent = path.parent
+        if "all_models_" in str(parent):
+            main_run_dirs.add(parent)
     
-    # Vytvoření adresáře pro souhrnné výsledky
-    summary_dir = Path(get_run_results_dir()) / "final_comparison"
-    summary_dir.mkdir(parents=True, exist_ok=True)
+    # Pokud jsme našli jen jeden hlavní adresář, použijeme ho
+    if len(main_run_dirs) == 1:
+        main_run_dir = list(main_run_dirs)[0]
+    else:
+        # Pokud jsme našli více hlavních adresářů nebo žádný, použijeme aktuální
+        main_run_dir = Path(get_run_results_dir())
     
-    print(f"Prohledávám {len(result_dirs)} adresářů s výsledky pro summary a overall CSV...")
-
-    # Slovníky pro ukládání výsledků podle typu pipeline (embedded, text, vlm)
-    all_summary_by_pipeline = {}  # Klíč: (pipeline_typ, field), Hodnota: seznam hodnot
-    all_overall_by_pipeline = {}  # Klíč: pipeline_typ, Hodnota: seznam hodnot
+    # Vytvoříme adresář pro finální porovnání v hlavním adresáři
+    summary_dir = main_run_dir / "final_comparison"
+    summary_dir.mkdir(exist_ok=True)
     
-    # Slovníky pro ukládání výsledků podle konkrétního modelu
-    all_summary_by_specific_model = {}  # Klíč: (model_name, field), Hodnota: seznam hodnot
-    all_overall_by_specific_model = {}  # Klíč: model_name, Hodnota: seznam hodnot
+    # Příprava dataframe pro uchování souhrnných dat
+    summary_data = {}
+    overall_data = {}
     
-    # Slovník pro mapování modelů na typy pipeline
-    model_to_pipeline_type = {}  # Klíč: model_name, Hodnota: pipeline_type (text, vision, embedding, hybrid, multimodal)
-
-    for result_dir_path_str in result_dirs:
-        result_dir = Path(result_dir_path_str)
+    # Nová struktura pro data seskupená podle konkrétních modelů
+    model_summary_data = {}
+    model_overall_data = {}
+    
+    # Názvy polí pro porovnání
+    comparison_fields = []
+    
+    # Pro každý adresář načteme výsledky
+    for result_dir in result_dirs:
+        dir_path = Path(result_dir)
+        config_name = dir_path.name
         
-        # Získání jména konfigurace z názvu adresáře
-        config_name_from_dir = result_dir.name 
+        # Načtení konfigurace pro tento adresář (preferujeme config.json před used_config.json)
+        config_data = {}
+        config_path = dir_path / "config.json"
+        used_config_path = dir_path / "used_config.json"
+        temp_config_path = dir_path / "temp_model_config.json"
         
-        # Načtení used_config.json pro identifikaci modelů
-        models_by_type = {
-            "text": "",
-            "vision": "",
-            "embedding": ""
-        }
-        
-        config_path = result_dir / "used_config.json"
         if config_path.exists():
             try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    used_config = json.load(f)
-                
-                # Získáme názvy konkrétních modelů
-                for pipeline_type in ["text", "vision", "embedding"]:
-                    if pipeline_type in used_config and "model" in used_config[pipeline_type]:
-                        # Zde ponecháme celý název modelu včetně verze
-                        models_by_type[pipeline_type] = used_config[pipeline_type]["model"]
-                        # Zapamatujeme si, že tento model patří do dané pipeline
-                        model_to_pipeline_type[models_by_type[pipeline_type]] = pipeline_type
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config_data = json.load(f)
             except Exception as e:
-                print(f"  Chyba při načítání konfigurace {config_path}: {e}")
-
-        summary_csv_path = result_dir / "summary_results.csv"
-        overall_csv_path = result_dir / "overall_summary_results.csv"
-
-        if summary_csv_path.exists():
+                print(f"Chyba při načítání konfigurace z {config_path}: {e}")
+        elif used_config_path.exists():
             try:
-                df_summary = pd.read_csv(summary_csv_path)
-                
-                if 'Model' in df_summary.columns:
-                    # Extrahujeme typ pipeline (EMBEDDED, TEXT, VLM)
-                    df_summary['OriginalModel'] = df_summary['Model']  # Zachováme původní název
-                    df_summary['PipelineType'] = df_summary['Model'].apply(
-                        lambda m: m.split("-")[-1] if "-" in m else m
-                    )
-                    
-                    # Mapování typů pipeline na konkrétní modely
-                    pipeline_to_model_map = {
-                        "EMBEDDED": models_by_type["embedding"],
-                        "TEXT": models_by_type["text"],
-                        "VLM": models_by_type["vision"],
-                        "HYBRID": "hybrid-text-vlm"  # Standardní název pro hybridní pipeline
-                    }
-                    
-                    # Přidáme názvy konkrétních modelů
-                    df_summary['SpecificModel'] = df_summary['PipelineType'].apply(
-                        lambda p: pipeline_to_model_map.get(p, "unknown")
-                    )
-                else:
-                    print(f"Varování: Chybí sloupec 'Model' v {summary_csv_path}.")
-                    continue
-                
-                # Ukládáme data podle typu pipeline
-                for _, row in df_summary.iterrows():
-                    # Klíč pro pipeline
-                    key_pipeline = (row['PipelineType'], row['Field'])
-                    if key_pipeline not in all_summary_by_pipeline:
-                        all_summary_by_pipeline[key_pipeline] = []
-                    all_summary_by_pipeline[key_pipeline].append({
-                        'Mean_Total': row['Mean_Total'],
-                        'Std_Total': row['Std_Total'] if 'Std_Total' in row else 0,
-                        'OriginalModel': row.get('OriginalModel', row['PipelineType'])
-                    })
-                    
-                    # Klíč pro konkrétní model
-                    specific_model = row['SpecificModel']
-                    if specific_model != "unknown" and specific_model:
-                        key_specific_model = (specific_model, row['Field'])
-                        if key_specific_model not in all_summary_by_specific_model:
-                            all_summary_by_specific_model[key_specific_model] = []
-                        all_summary_by_specific_model[key_specific_model].append({
-                            'Mean_Total': row['Mean_Total'],
-                            'Std_Total': row['Std_Total'] if 'Std_Total' in row else 0,
-                            'PipelineType': row['PipelineType'],
-                            'OriginalModel': row.get('OriginalModel', row['PipelineType'])
-                        })
-                
-                print(f"  Načten soubor: {summary_csv_path}")
+                with open(used_config_path, "r", encoding="utf-8") as f:
+                    config_data = json.load(f)
             except Exception as e:
-                print(f"  Chyba při načítání {summary_csv_path}: {e}")
-        else:
-            print(f"  Soubor nenalezen: {summary_csv_path}")
-
-        if overall_csv_path.exists():
+                print(f"Chyba při načítání konfigurace z {used_config_path}: {e}")
+        elif temp_config_path.exists():
             try:
-                df_overall = pd.read_csv(overall_csv_path)
-                
-                if 'Model' in df_overall.columns:
-                    # Extrahujeme typ pipeline (EMBEDDED, TEXT, VLM)
-                    df_overall['OriginalModel'] = df_overall['Model']
-                    df_overall['PipelineType'] = df_overall['Model'].apply(
-                        lambda m: m.split("-")[-1] if "-" in m else m
-                    )
-                    
-                    # Mapování typů pipeline na konkrétní modely
-                    pipeline_to_model_map = {
-                        "EMBEDDED": models_by_type["embedding"],
-                        "TEXT": models_by_type["text"],
-                        "VLM": models_by_type["vision"],
-                        "HYBRID": "hybrid-text-vlm"  # Standardní název pro hybridní pipeline
-                    }
-                    
-                    # Přidáme názvy konkrétních modelů
-                    df_overall['SpecificModel'] = df_overall['PipelineType'].apply(
-                        lambda p: pipeline_to_model_map.get(p, "unknown")
-                    )
-                else:
-                    print(f"Varování: Chybí sloupec 'Model' v {overall_csv_path}.")
-                    continue
-                
-                # Ukládáme data do slovníku podle typu pipeline
-                for _, row in df_overall.iterrows():
-                    # Pro pipeline
-                    key_pipeline = row['PipelineType']
-                    if key_pipeline not in all_overall_by_pipeline:
-                        all_overall_by_pipeline[key_pipeline] = []
-                    all_overall_by_pipeline[key_pipeline].append({
-                        'Mean_Total_Overall': row['Mean_Total_Overall'],
-                        'Std_Total_Overall': row['Std_Total_Overall'] if 'Std_Total_Overall' in row else 0,
-                        'OriginalModel': row.get('OriginalModel', row['PipelineType'])
-                    })
-                    
-                    # Pro konkrétní model
-                    specific_model = row['SpecificModel']
-                    if specific_model != "unknown" and specific_model:
-                        if specific_model not in all_overall_by_specific_model:
-                            all_overall_by_specific_model[specific_model] = []
-                        all_overall_by_specific_model[specific_model].append({
-                            'Mean_Total_Overall': row['Mean_Total_Overall'],
-                            'Std_Total_Overall': row['Std_Total_Overall'] if 'Std_Total_Overall' in row else 0,
-                            'PipelineType': row['PipelineType'],
-                            'OriginalModel': row.get('OriginalModel', specific_model)
-                        })
-                
-                print(f"  Načten soubor: {overall_csv_path}")
+                with open(temp_config_path, "r", encoding="utf-8") as f:
+                    config_data = json.load(f)
             except Exception as e:
-                print(f"  Chyba při načítání {overall_csv_path}: {e}")
-        else:
-            print(f"  Soubor nenalezen: {overall_csv_path}")
-    
-    # --- 1. Generování grafů podle typu pipeline ---
-    print("\nGenerování grafů podle typu pipeline (EMBEDDED, TEXT, VLM, HYBRID, MULTIMODAL)...")
-    
-    # Vytvoření agregovaných dataframů pro jednotlivá pole podle pipeline
-    rows_summary_pipeline = []
-    for (pipeline_type, field), values in all_summary_by_pipeline.items():
-        # Výpočet průměru a směrodatné odchylky
-        mean_values = [v['Mean_Total'] for v in values]
-        avg_mean = sum(mean_values) / len(mean_values)
-        std_values = [v['Std_Total'] for v in values]
-        avg_std = (sum([s**2 for s in std_values]) / len(std_values))**0.5
+                print(f"Chyba při načítání konfigurace z {temp_config_path}: {e}")
         
-        rows_summary_pipeline.append({
-            'Model': pipeline_type,
-            'Field': field,
-            'Mean_Total': avg_mean,
-            'Std_Total': avg_std,
-            'OriginalModels': ", ".join(set([v['OriginalModel'] for v in values]))
-        })
-    
-    # Vytvoření agregovaného dataframu pro celkové výsledky podle pipeline
-    rows_overall_pipeline = []
-    for pipeline_type, values in all_overall_by_pipeline.items():
-        mean_values = [v['Mean_Total_Overall'] for v in values]
-        avg_mean = sum(mean_values) / len(mean_values)
-        std_values = [v['Std_Total_Overall'] for v in values]
-        avg_std = (sum([s**2 for s in std_values]) / len(std_values))**0.5
+        # Získání názvů modelů z konfigurace
+        text_model = config_data.get("text", {}).get("model", "unknown-text-model")
+        vision_model = config_data.get("vision", {}).get("model", "unknown-vision-model")
+        embedding_model = config_data.get("embedding", {}).get("model", "unknown-embedding-model")
+        multimodal_model = config_data.get("multimodal", {}).get("model", vision_model)  # Default na vision model
         
-        rows_overall_pipeline.append({
-            'Model': pipeline_type,
-            'Mean_Total_Overall': avg_mean,
-            'Std_Total_Overall': avg_std,
-            'OriginalModels': ", ".join(set([v['OriginalModel'] for v in values]))
-        })
-    
-    # Vytvoření dataframů z agregovaných dat podle pipeline
-    pipeline_summary_df = pd.DataFrame(rows_summary_pipeline) if rows_summary_pipeline else pd.DataFrame()
-    pipeline_overall_df = pd.DataFrame(rows_overall_pipeline) if rows_overall_pipeline else pd.DataFrame()
-    
-    # Generování grafů podle typu pipeline
-    created_files_pipeline = generate_comparison_graphs(
-        summary_df=pipeline_summary_df,
-        overall_df=pipeline_overall_df,
-        summary_dir=summary_dir,
-        suffix="-pipelines",
-        title_prefix="Porovnání úspěšnosti typů pipeline",
-        xlabel="Typ pipeline"
-    )
-    
-    # --- 2. Generování grafů podle konkrétních modelů ---
-    print("\nGenerování grafů podle konkrétních modelů...")
-    
-    # Vytvoření agregovaných dataframů pro jednotlivá pole podle konkrétních modelů
-    rows_summary_specific_model = []
-    for (specific_model, field), values in all_summary_by_specific_model.items():
-        # Výpočet průměru a směrodatné odchylky
-        mean_values = [v['Mean_Total'] for v in values]
-        avg_mean = sum(mean_values) / len(mean_values)
-        std_values = [v['Std_Total'] for v in values]
-        avg_std = (sum([s**2 for s in std_values]) / len(std_values))**0.5
+        # Pro porovnání potřebujeme soubory *_comparison_semantic.json
+        # nebo jako zálohu *_comparison.json
         
-        # Zjistíme typ pipeline pro tento model
-        pipeline_type = next((v['PipelineType'] for v in values if 'PipelineType' in v), 'unknown')
+        # Priorita typů pipeline
+        pipeline_types = ["hybrid", "embedded", "text", "vlm", "multimodal"]
         
-        rows_summary_specific_model.append({
-            'Model': specific_model,
-            'Field': field,
-            'Mean_Total': avg_mean,
-            'Std_Total': avg_std,
-            'PipelineType': pipeline_type,  # Přidáme typ pipeline pro barevné rozlišení
-            'OriginalModels': ", ".join(set([v['OriginalModel'] for v in values]))
-        })
-    
-    # Vytvoření agregovaného dataframu pro celkové výsledky podle konkrétních modelů
-    rows_overall_specific_model = []
-    for specific_model, values in all_overall_by_specific_model.items():
-        mean_values = [v['Mean_Total_Overall'] for v in values]
-        avg_mean = sum(mean_values) / len(mean_values)
-        std_values = [v['Std_Total_Overall'] for v in values]
-        avg_std = (sum([s**2 for s in std_values]) / len(std_values))**0.5
-        
-        # Zjistíme typ pipeline pro tento model
-        pipeline_type = next((v['PipelineType'] for v in values if 'PipelineType' in v), 'unknown')
-        
-        rows_overall_specific_model.append({
-            'Model': specific_model,
-            'Mean_Total_Overall': avg_mean,
-            'Std_Total_Overall': avg_std,
-            'PipelineType': pipeline_type,  # Přidáme typ pipeline pro barevné rozlišení
-            'OriginalModels': ", ".join(set([v['OriginalModel'] for v in values]))
-        })
-    
-    # Vytvoření dataframů z agregovaných dat podle konkrétních modelů
-    specific_model_summary_df = pd.DataFrame(rows_summary_specific_model) if rows_summary_specific_model else pd.DataFrame()
-    specific_model_overall_df = pd.DataFrame(rows_overall_specific_model) if rows_overall_specific_model else pd.DataFrame()
-    
-    # Generování grafů podle konkrétních modelů s barevným rozlišením podle typu pipeline
-    created_files_specific_model = generate_comparison_graphs_with_colors(
-        summary_df=specific_model_summary_df,
-        overall_df=specific_model_overall_df,
-        summary_dir=summary_dir,
-        suffix="-models",
-        title_prefix="Porovnání úspěšnosti konkrétních modelů",
-        xlabel="Model"
-    )
-    
-    # Sloučení seznamů vytvořených souborů
-    created_files = created_files_pipeline + created_files_specific_model
-    unique_created_files = sorted(list(set(created_files)))
-    
-    # Závěrečný výpis
-    if is_final:
-        print(f"\nFinální souhrnné výsledky byly uloženy do adresáře: {summary_dir}")
-        print(f"Vytvořeno/aktualizováno {len(unique_created_files)} souborů.")
-        if unique_created_files:
-             print("\nVytvořené soubory:")
-             for fname in unique_created_files:
-                 print(f"  - {fname}")
-    else:
-        print(f"\nPrůběžné výsledky byly aktualizovány v adresáři: {summary_dir}")
-        print(f"Vytvořeno/aktualizováno {len(unique_created_files)} souborů.")
-        
-    # Výpis aktuálního pořadí typů pipeline
-    if not pipeline_overall_df.empty and 'Mean_Total_Overall' in pipeline_overall_df.columns:
-        print("\nAktuální pořadí typů pipeline (podle průměrné celkové úspěšnosti):")
-        df_overall_sorted_pipeline = pipeline_overall_df.sort_values('Mean_Total_Overall', ascending=False)
-        for i, (_, row) in enumerate(df_overall_sorted_pipeline.iterrows(), 1):
-            pipeline_disp = row['Model']
-            mean_disp = row['Mean_Total_Overall']
-            std_disp = row['Std_Total_Overall'] if 'Std_Total_Overall' in row and pd.notna(row['Std_Total_Overall']) else 0
-            print(f"{i}. {pipeline_disp}: {mean_disp:.4f} ± {std_disp:.4f}")
+        for pipeline in pipeline_types:
+            semantic_file = dir_path / f"{pipeline}_comparison_semantic.json"
+            standard_file = dir_path / f"{pipeline}_comparison.json"
             
-    # Výpis aktuálního pořadí konkrétních modelů
-    if not specific_model_overall_df.empty and 'Mean_Total_Overall' in specific_model_overall_df.columns:
-        print("\nAktuální pořadí konkrétních modelů (podle průměrné celkové úspěšnosti):")
-        df_overall_sorted_model = specific_model_overall_df.sort_values('Mean_Total_Overall', ascending=False)
-        for i, (_, row) in enumerate(df_overall_sorted_model.iterrows(), 1):
-            model_disp = row['Model']
-            mean_disp = row['Mean_Total_Overall']
-            std_disp = row['Std_Total_Overall'] if 'Std_Total_Overall' in row and pd.notna(row['Std_Total_Overall']) else 0
-            pipeline_type = row.get('PipelineType', 'neznámá pipeline')
-            print(f"{i}. {model_disp}: {mean_disp:.4f} ± {std_disp:.4f} (typ: {pipeline_type})")
+            if semantic_file.exists():
+                file_to_use = semantic_file
+                comparison_type = "semantic"
+            elif standard_file.exists():
+                file_to_use = standard_file
+                comparison_type = "standard"
+            else:
+                continue  # Přeskočíme, pokud nemáme žádný soubor porovnání
+            
+            try:
+                with open(file_to_use, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                pipeline_upper = pipeline.upper()
+                comparison = data.get("comparison", {})
+                metrics = data.get("metrics", {})
+                    
+                # Záznam konfigurace a typu porovnání
+                for doi, doc_data in comparison.items():
+                    if "config" not in doc_data:
+                        doc_data["config"] = config_name
+                    if "comparison_type" not in doc_data:
+                        doc_data["comparison_type"] = comparison_type
+                
+                # Určení konkrétního názvu modelu podle typu pipeline
+                concrete_model_name = pipeline_upper  # Default
+                if pipeline.lower() == "text":
+                    concrete_model_name = f"{text_model} (TEXT)"
+                elif pipeline.lower() == "vlm":
+                    concrete_model_name = f"{vision_model} (VLM)"
+                elif pipeline.lower() == "embedded":
+                    concrete_model_name = f"{embedding_model} (EMBEDDED)"
+                elif pipeline.lower() == "multimodal":
+                    concrete_model_name = f"{multimodal_model} (MULTIMODAL)"
+                elif pipeline.lower() == "hybrid":
+                    # Pro hybrid: pokud jsou modely stejné, použijeme jen název modelu
+                    if text_model == vision_model:
+                        concrete_model_name = f"{text_model} (HYBRID)"
+                    else:
+                        concrete_model_name = f"{text_model}+{vision_model} (HYBRID)"
+                
+                # Zpracování srovnání na úrovni dokumentů
+                for doi, doc_comparison in comparison.items():
+                    # Přeskočíme dokumenty bez overall_similarity
+                    if "overall_similarity" not in doc_comparison or doc_comparison["overall_similarity"] is None:
+                        continue
+                
+                    fields = list(doc_comparison.keys())
+                    if not comparison_fields:
+                        # První iterace, nastavíme pole pro porovnání
+                        comparison_fields = [f for f in fields if f not in ["overall_similarity", "config", "comparison_type"]]
+                    
+                    # Přidáme záznam pro tuto pipeline, tento dokument
+                    for field in comparison_fields:
+                        if field in doc_comparison:
+                            if field not in summary_data:
+                                summary_data[field] = {}
+                            
+                            if pipeline_upper not in summary_data[field]:
+                                summary_data[field][pipeline_upper] = {
+                                    "values": [],
+                                    "pipeline": pipeline_upper,
+                                    "field": field,
+                                    "config": config_name
+                                }
+                            
+                            # Přidáme hodnotu podobnosti pro dané pole
+                            value = doc_comparison[field]
+                            if isinstance(value, dict) and "similarity" in value:
+                                similarity = value["similarity"]
+                                if similarity is not None:  # Přidáme pouze neprázdné hodnoty
+                                    summary_data[field][pipeline_upper]["values"].append(similarity)
+                    
+                    # Paralelní logika pro data seskupená podle konkrétních modelů
+                    for field in comparison_fields:
+                        if field in doc_comparison:
+                            if field not in model_summary_data:
+                                model_summary_data[field] = {}
+                            
+                            if concrete_model_name not in model_summary_data[field]:
+                                model_summary_data[field][concrete_model_name] = {
+                                    "values": [],
+                                    "pipeline": pipeline_upper,
+                                    "field": field,
+                                    "config": config_name
+                                }
+                            
+                            # Přidáme hodnotu podobnosti pro dané pole podle konkrétního modelu
+                            value = doc_comparison[field]
+                            if isinstance(value, dict) and "similarity" in value:
+                                similarity = value["similarity"]
+                                if similarity is not None:  # Přidáme pouze neprázdné hodnoty
+                                    model_summary_data[field][concrete_model_name]["values"].append(similarity)
+                    
+                    # Přidáme celkové skóre podobnosti
+                    if "overall_similarity" in doc_comparison:
+                        if pipeline_upper not in overall_data:
+                            overall_data[pipeline_upper] = {
+                                "values": [],
+                                "pipeline": pipeline_upper,
+                                "config": config_name
+                            }
+                        
+                        overall_sim = doc_comparison["overall_similarity"]
+                        if overall_sim is not None:  # Přidáme pouze neprázdné hodnoty
+                            overall_data[pipeline_upper]["values"].append(overall_sim)
+                            
+                        # Paralelní logika pro celkové skóre podle konkrétních modelů
+                        if concrete_model_name not in model_overall_data:
+                            model_overall_data[concrete_model_name] = {
+                                "values": [],
+                                "pipeline": pipeline_upper,
+                                "config": config_name
+                            }
+                        
+                        if overall_sim is not None:  # Přidáme pouze neprázdné hodnoty
+                            model_overall_data[concrete_model_name]["values"].append(overall_sim)
+            
+            except Exception as e:
+                print(f"Chyba při zpracování souboru {file_to_use}: {e}")
+                continue
+                
+    # Pokud nemáme žádná data, ukončíme
+    if not summary_data:
+        print("Žádná data k porovnání.")
+        return
+    
+    # Vytvoření souhrnných dataframe
+    summary_rows = []
+    for field, models in summary_data.items():
+        for model, data in models.items():
+            values = data["values"]
+            
+            if values:
+                mean_value = round(sum(values) / len(values), 4)
+                std_dev = round(np.std(values), 4) if len(values) > 1 else 0
+                
+                summary_rows.append({
+                    "Field": field,
+                    "Model": model,
+                    "N": len(values),
+                    "Mean": mean_value,
+                    "StdDev": std_dev,
+                    "Config": data["config"],
+                    "PipelineType": model  # Přidání typu pipeline
+                })
+    
+    # Vytvoření souhrnného dataframe pro celkovou podobnost
+    overall_rows = []
+    for model, data in overall_data.items():
+        values = data["values"]
+        
+        if values:
+            mean_value = round(sum(values) / len(values), 4)
+            std_dev = round(np.std(values), 4) if len(values) > 1 else 0
+            
+            overall_rows.append({
+                "Model": model,
+                "N": len(values),
+                "Mean_Total_Overall": mean_value,
+                "Std_Total_Overall": std_dev,  # Změna názvu sloupce
+                "Config": data["config"],
+                "PipelineType": model  # Přidání typu pipeline
+            })
+    
+    # Vytvoření DataFrame a uložení CSV
+    summary_df = pd.DataFrame(summary_rows)
+    overall_df = pd.DataFrame(overall_rows)
+    
+    # Vytvoření DataFrames pro data seskupená podle konkrétních modelů
+    model_summary_rows = []
+    for field, models in model_summary_data.items():
+        for model, data in models.items():
+            values = data["values"]
+            
+            if values:
+                mean_value = round(sum(values) / len(values), 4)
+                std_dev = round(np.std(values), 4) if len(values) > 1 else 0
+                
+                model_summary_rows.append({
+                    "Field": field,
+                    "Model": model,
+                    "N": len(values),
+                    "Mean": mean_value,
+                    "StdDev": std_dev,
+                    "Config": data["config"],
+                    "PipelineType": data["pipeline"]  # Typ pipeline, ze kterého model pochází
+                })
+    
+    model_overall_rows = []
+    for model, data in model_overall_data.items():
+        values = data["values"]
+        
+        if values:
+            mean_value = round(sum(values) / len(values), 4)
+            std_dev = round(np.std(values), 4) if len(values) > 1 else 0
+            
+            model_overall_rows.append({
+                "Model": model,
+                "N": len(values),
+                "Mean_Total_Overall": mean_value,
+                "Std_Total_Overall": std_dev,
+                "Config": data["config"],
+                "PipelineType": data["pipeline"]  # Typ pipeline, ze kterého model pochází
+            })
+    
+    model_summary_df = pd.DataFrame(model_summary_rows)
+    model_overall_df = pd.DataFrame(model_overall_rows)
+    
+    # Pouze pokud máme data
+    if not summary_df.empty:
+        # Uložení CSV souborů pro každý typ porovnání
+        for pipeline_type in ["embedded", "text", "vlm", "hybrid", "multimodal"]:
+            pipeline_upper = pipeline_type.upper()
+        
+            # Filtrování dat pro daný typ pipeline
+            pipeline_summary = summary_df[summary_df["Model"] == pipeline_upper] if not summary_df.empty else pd.DataFrame()
+            pipeline_overall = overall_df[overall_df["Model"] == pipeline_upper] if not overall_df.empty else pd.DataFrame()
+            
+            if not pipeline_summary.empty and not pipeline_overall.empty:
+                # Uložení CSV
+                pipeline_csv_path = summary_dir / f"{pipeline_type}_comparison.csv"
+                pipeline_summary.to_csv(pipeline_csv_path, index=False)
+                
+                pipeline_overall_csv_path = summary_dir / f"{pipeline_type}_overall.csv"
+                pipeline_overall.to_csv(pipeline_overall_csv_path, index=False)
+    
+        # Uložení souhrnných CSV souborů
+        summary_csv_path = summary_dir / "summary_all_fields.csv"
+        summary_df.to_csv(summary_csv_path, index=False)
+        
+        overall_csv_path = summary_dir / "overall_all.csv"
+        overall_df.to_csv(overall_csv_path, index=False)
+    
+        # Generování grafů
+        if is_final:
+            try:
+                # Přejmenování sloupců pro správnou kompatibilitu s funkcemi generování grafů
+                if not summary_df.empty:
+                    summary_df_renamed = summary_df.copy()
+                    summary_df_renamed = summary_df_renamed.rename(columns={
+                        'Mean': 'Mean_Total',
+                        'StdDev': 'Std_Total'
+                    })
+                else:
+                    summary_df_renamed = summary_df
+                
+                # Generování standardních grafů porovnávajících průměrné výsledky podle typu pipeline
+                generate_comparison_graphs(summary_df_renamed, overall_df, summary_dir, suffix="-pipelines", 
+                                          title_prefix="Porovnání úspěšnosti pipeline", xlabel="Pipeline")
+                
+                # Generování grafů s barevným rozlišením konkrétních modelů
+                if not model_summary_df.empty:
+                    model_summary_df_renamed = model_summary_df.copy()
+                    model_summary_df_renamed = model_summary_df_renamed.rename(columns={
+                        'Mean': 'Mean_Total',
+                        'StdDev': 'Std_Total'
+                    })
+                else:
+                    model_summary_df_renamed = model_summary_df
+                
+                generate_comparison_graphs_with_colors(model_summary_df_renamed, model_overall_df, summary_dir, suffix="-models", 
+                                                      title_prefix="Porovnání úspěšnosti modelů", xlabel="Model")
+            except Exception as e:
+                print(f"Chyba při generování grafů: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("Průběžné porovnání dokončeno. Finální grafy budou vygenerovány na konci běhu.")
+    else:
+        print("Žádná data k vykreslení grafů.")
 
 
 def generate_comparison_graphs(summary_df, overall_df, summary_dir, suffix="", title_prefix="Porovnání úspěšnosti", xlabel="Model"):
@@ -962,11 +935,17 @@ def generate_comparison_graphs(summary_df, overall_df, summary_dir, suffix="", t
     
     # Kontrola základních požadavků na dataframy
     required_summary_cols = ['Field', 'Model', 'Mean_Total', 'Std_Total']
-    required_overall_cols = ['Model', 'Mean_Total_Overall', 'Std_Total_Overall']
+    if 'Mean_Base' in summary_df.columns and 'Mean_Improved' in summary_df.columns:
+        has_improvement_data = True
+    else:
+        has_improvement_data = False
     
     if summary_df.empty and overall_df.empty:
         print(f"Nebylo možné spojit žádná data pro grafy{suffix}.")
         return created_files
+
+    # Barva pro vylepšenou část (sémantické zlepšení)
+    improved_color = "#f8c471"  # světle oranžová
 
     # --- Vytvoření grafů pro jednotlivá pole ---
     if not summary_df.empty and all(col in summary_df.columns for col in required_summary_cols):
@@ -986,14 +965,39 @@ def generate_comparison_graphs(summary_df, overall_df, summary_dir, suffix="", t
             
             x_pos = np.arange(len(models))
             
-            bars = plt.bar(x_pos, means, color='skyblue')
-            plt.errorbar(x_pos, means, yerr=errors, fmt='none', ecolor='black', capsize=5)
+            if has_improvement_data:
+                # Vykreslení základní části a vylepšené části odděleně
+                base_values = df_field['Mean_Base']
+                improved_values = df_field['Mean_Improved']
+                
+                # Základní část
+                plt.bar(x_pos, base_values, color='skyblue', alpha=0.8)
+                
+                # Vylepšená část (pokud existuje)
+                plt.bar(x_pos, improved_values, bottom=base_values, color=improved_color, alpha=0.8)
+                
+                # Chybové úsečky na celkové hodnotě
+                plt.errorbar(x_pos, means, yerr=errors, fmt='none', ecolor='black', capsize=5)
+            else:
+                # Vykreslení standardních sloupců
+                bars = plt.bar(x_pos, means, color='skyblue')
+                plt.errorbar(x_pos, means, yerr=errors, fmt='none', ecolor='black', capsize=5)
 
             plt.title(f'{title_prefix} - {field} (průměr ±1σ)')
             plt.xlabel(xlabel)
             plt.ylabel('Průměrná podobnost')
             plt.xticks(x_pos, models, rotation=45, ha="right")
             plt.ylim(0, max(1.05, (means + errors).max() * 1.1))
+            
+            # Přidání legendy pro vylepšení
+            if has_improvement_data:
+                from matplotlib.patches import Patch
+                legend_elements = [
+                    Patch(facecolor='skyblue', alpha=0.8, label='Základní hodnota'),
+                    Patch(facecolor=improved_color, alpha=0.8, label='Vylepšení sémantickou kontrolou')
+                ]
+                plt.legend(handles=legend_elements, loc='upper right')
+            
             plt.tight_layout()
             
             output_file = summary_dir / f"{field}_comparison{suffix}.png"
@@ -1008,7 +1012,7 @@ def generate_comparison_graphs(summary_df, overall_df, summary_dir, suffix="", t
             try:
                 field_columns = ['Model', 'Mean_Total', 'Std_Total']
                 # Přidáme další sloupce, pokud existují
-                for col in ['OriginalModels', 'PipelineTypes', 'PipelineType']:
+                for col in ['Mean_Base', 'Mean_Improved', 'OriginalModels', 'PipelineTypes', 'PipelineType']:
                     if col in df_field.columns:
                         field_columns.append(col)
                 df_field[field_columns].to_csv(output_csv, index=False, float_format='%.4f')
@@ -1020,7 +1024,7 @@ def generate_comparison_graphs(summary_df, overall_df, summary_dir, suffix="", t
         print(f"Přeskakuji generování grafů a CSV pro jednotlivá pole{suffix} - chybí data nebo sloupce.")
 
     # --- Vytvoření grafu celkových výsledků ---
-    if not overall_df.empty and all(col in overall_df.columns for col in required_overall_cols):
+    if not overall_df.empty and 'Mean_Total_Overall' in overall_df.columns and 'Std_Total_Overall' in overall_df.columns:
         
         df_overall_sorted = overall_df.sort_values(by='Mean_Total_Overall', ascending=False)
         
@@ -1031,8 +1035,32 @@ def generate_comparison_graphs(summary_df, overall_df, summary_dir, suffix="", t
         x_pos_overall = np.arange(len(models_overall))
 
         plt.figure(figsize=(max(10, len(models_overall)*0.8), 6))
-        bars_overall = plt.bar(x_pos_overall, means_overall, color='lightcoral')
-        plt.errorbar(x_pos_overall, means_overall, yerr=errors_overall, fmt='none', ecolor='black', capsize=5)
+        
+        if 'Mean_Base_Overall' in df_overall_sorted.columns and 'Mean_Improved_Overall' in df_overall_sorted.columns:
+            # Vykreslení základní části a vylepšené části odděleně
+            base_values = df_overall_sorted['Mean_Base_Overall']
+            improved_values = df_overall_sorted['Mean_Improved_Overall']
+            
+            # Základní část
+            plt.bar(x_pos_overall, base_values, color='lightcoral', alpha=0.8)
+            
+            # Vylepšená část (pokud existuje)
+            plt.bar(x_pos_overall, improved_values, bottom=base_values, color=improved_color, alpha=0.8)
+            
+            # Chybové úsečky na celkové hodnotě
+            plt.errorbar(x_pos_overall, means_overall, yerr=errors_overall, fmt='none', ecolor='black', capsize=5)
+            
+            # Legenda
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='lightcoral', alpha=0.8, label='Základní hodnota'),
+                Patch(facecolor=improved_color, alpha=0.8, label='Vylepšení sémantickou kontrolou')
+            ]
+            plt.legend(handles=legend_elements, loc='upper right')
+        else:
+            # Vykreslení standardních sloupců
+            bars_overall = plt.bar(x_pos_overall, means_overall, color='lightcoral')
+            plt.errorbar(x_pos_overall, means_overall, yerr=errors_overall, fmt='none', ecolor='black', capsize=5)
 
         plt.title(f'Celková úspěšnost {xlabel.lower()}ů (průměr ±1σ)')
         plt.xlabel(xlabel)
@@ -1053,7 +1081,7 @@ def generate_comparison_graphs(summary_df, overall_df, summary_dir, suffix="", t
         try:
             overall_columns = ['Model', 'Mean_Total_Overall', 'Std_Total_Overall']
             # Přidáme další sloupce, pokud existují
-            for col in ['OriginalModels', 'PipelineTypes', 'PipelineType']:
+            for col in ['Mean_Base_Overall', 'Mean_Improved_Overall', 'OriginalModels', 'PipelineTypes', 'PipelineType']:
                 if col in df_overall_sorted.columns:
                     overall_columns.append(col)
             df_overall_sorted[overall_columns].to_csv(output_csv_overall, index=False, float_format='%.4f')
@@ -1094,8 +1122,11 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
     created_files = []
     
     # Kontrola základních požadavků na dataframy
-    required_summary_cols = ['Field', 'Model', 'Mean_Total', 'Std_Total', 'PipelineType']
-    required_overall_cols = ['Model', 'Mean_Total_Overall', 'Std_Total_Overall', 'PipelineType']
+    required_summary_cols = ['Field', 'Model', 'Mean_Total', 'Std_Total']
+    if 'Mean_Base' in summary_df.columns and 'Mean_Improved' in summary_df.columns:
+        has_improvement_data = True
+    else:
+        has_improvement_data = False
     
     if summary_df.empty and overall_df.empty:
         print(f"Nebylo možné spojit žádná data pro grafy{suffix}.")
@@ -1106,11 +1137,15 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
         'TEXT': 'royalblue',
         'EMBEDDED': 'green',
         'VLM': 'firebrick',
-        'HYBRID': 'purple'  # Fialová barva pro hybridní pipeline
+        'HYBRID': 'purple',  # Fialová barva pro hybridní pipeline
+        'MULTIMODAL': 'orange'  # Oranžová barva pro multimodální pipeline
     }
     
+    # Barva pro vylepšenou část (sémantické zlepšení)
+    improved_color = "#f8c471"  # světle oranžová
+    
     # --- Vytvoření grafů pro jednotlivá pole ---
-    if not summary_df.empty and all(col in summary_df.columns for col in required_summary_cols[:4]):
+    if not summary_df.empty and all(col in summary_df.columns for col in required_summary_cols):
         metadata_fields = summary_df['Field'].unique()
         
         for field in metadata_fields:
@@ -1127,14 +1162,32 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
             
             x_pos = np.arange(len(models))
             
-            # Použití barev podle typu pipeline
-            bar_colors = []
-            for _, row in df_field.iterrows():
-                pipeline_type = row.get('PipelineType', 'unknown')
-                bar_colors.append(pipeline_colors.get(pipeline_type, 'gray'))
-            
-            bars = plt.bar(x_pos, means, color=bar_colors)
-            plt.errorbar(x_pos, means, yerr=errors, fmt='none', ecolor='black', capsize=5)
+            if has_improvement_data:
+                # Vykreslení základní části a vylepšené části odděleně, s barvami podle pipeline
+                for i, (_, row) in enumerate(df_field.iterrows()):
+                    pipeline_type = row.get('PipelineType', 'unknown')
+                    base_color = pipeline_colors.get(pipeline_type, 'gray')
+                    
+                    # Základní část
+                    base_value = row['Mean_Base']
+                    plt.bar(x_pos[i], base_value, color=base_color, alpha=0.8)
+                    
+                    # Vylepšená část (pokud existuje)
+                    improved_value = row['Mean_Improved']
+                    if improved_value > 0:
+                        plt.bar(x_pos[i], improved_value, bottom=base_value, color=improved_color, alpha=0.8)
+                
+                # Chybové úsečky na celkové hodnotě
+                plt.errorbar(x_pos, means, yerr=errors, fmt='none', ecolor='black', capsize=5)
+            else:
+                # Použití barev podle typu pipeline
+                bar_colors = []
+                for _, row in df_field.iterrows():
+                    pipeline_type = row.get('PipelineType', 'unknown')
+                    bar_colors.append(pipeline_colors.get(pipeline_type, 'gray'))
+                
+                bars = plt.bar(x_pos, means, color=bar_colors)
+                plt.errorbar(x_pos, means, yerr=errors, fmt='none', ecolor='black', capsize=5)
 
             plt.title(f'{title_prefix} - {field} (průměr ±1σ)')
             plt.xlabel(xlabel)
@@ -1148,8 +1201,16 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
                 Patch(facecolor=pipeline_colors['TEXT'], label='Text model'),
                 Patch(facecolor=pipeline_colors['EMBEDDED'], label='Embedding model'),
                 Patch(facecolor=pipeline_colors['VLM'], label='Vision model'),
-                Patch(facecolor=pipeline_colors['HYBRID'], label='Hybrid model (Text+VLM)')
+                Patch(facecolor=pipeline_colors['HYBRID'], label='Hybrid model (LLM+VLM)'),
+                Patch(facecolor=pipeline_colors['MULTIMODAL'], label='Multimodal model (Text+Vision)')
             ]
+            
+            # Přidání legendy pro vylepšení
+            if has_improvement_data:
+                legend_elements.append(
+                    Patch(facecolor=improved_color, alpha=0.8, label='Vylepšení sémantickou kontrolou')
+                )
+            
             plt.legend(handles=legend_elements, loc='upper right')
             
             plt.tight_layout()
@@ -1166,7 +1227,7 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
             try:
                 field_columns = ['Model', 'Mean_Total', 'Std_Total', 'PipelineType']
                 # Přidáme další sloupce, pokud existují
-                for col in ['OriginalModels']:
+                for col in ['Mean_Base', 'Mean_Improved', 'OriginalModels']:
                     if col in df_field.columns:
                         field_columns.append(col)
                 df_field[field_columns].to_csv(output_csv, index=False, float_format='%.4f')
@@ -1178,7 +1239,7 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
         print(f"Přeskakuji generování grafů a CSV pro jednotlivá pole{suffix} - chybí data nebo sloupce.")
 
     # --- Vytvoření grafu celkových výsledků ---
-    if not overall_df.empty and all(col in overall_df.columns for col in required_overall_cols[:3]):
+    if not overall_df.empty and 'Mean_Total_Overall' in overall_df.columns and 'Std_Total_Overall' in overall_df.columns:
         
         df_overall_sorted = overall_df.sort_values(by='Mean_Total_Overall', ascending=False)
         
@@ -1190,14 +1251,32 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
 
         plt.figure(figsize=(max(10, len(models_overall)*0.8), 6))
         
-        # Použití barev podle typu pipeline
-        bar_colors = []
-        for _, row in df_overall_sorted.iterrows():
-            pipeline_type = row.get('PipelineType', 'unknown')
-            bar_colors.append(pipeline_colors.get(pipeline_type, 'gray'))
-        
-        bars_overall = plt.bar(x_pos_overall, means_overall, color=bar_colors)
-        plt.errorbar(x_pos_overall, means_overall, yerr=errors_overall, fmt='none', ecolor='black', capsize=5)
+        if 'Mean_Base_Overall' in df_overall_sorted.columns and 'Mean_Improved_Overall' in df_overall_sorted.columns:
+            # Vykreslení základní části a vylepšené části odděleně, s barvami podle pipeline
+            for i, (_, row) in enumerate(df_overall_sorted.iterrows()):
+                pipeline_type = row.get('PipelineType', 'unknown')
+                base_color = pipeline_colors.get(pipeline_type, 'gray')
+                
+                # Základní část
+                base_value = row['Mean_Base_Overall']
+                plt.bar(x_pos_overall[i], base_value, color=base_color, alpha=0.8)
+                
+                # Vylepšená část (pokud existuje)
+                improved_value = row['Mean_Improved_Overall']
+                if improved_value > 0:
+                    plt.bar(x_pos_overall[i], improved_value, bottom=base_value, color=improved_color, alpha=0.8)
+            
+            # Chybové úsečky na celkové hodnotě
+            plt.errorbar(x_pos_overall, means_overall, yerr=errors_overall, fmt='none', ecolor='black', capsize=5)
+        else:
+            # Použití barev podle typu pipeline
+            bar_colors = []
+            for _, row in df_overall_sorted.iterrows():
+                pipeline_type = row.get('PipelineType', 'unknown')
+                bar_colors.append(pipeline_colors.get(pipeline_type, 'gray'))
+            
+            bars_overall = plt.bar(x_pos_overall, means_overall, color=bar_colors)
+            plt.errorbar(x_pos_overall, means_overall, yerr=errors_overall, fmt='none', ecolor='black', capsize=5)
 
         plt.title(f'Celková úspěšnost {xlabel.lower()}ů (průměr ±1σ)')
         plt.xlabel(xlabel)
@@ -1211,8 +1290,16 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
             Patch(facecolor=pipeline_colors['TEXT'], label='Text model'),
             Patch(facecolor=pipeline_colors['EMBEDDED'], label='Embedding model'),
             Patch(facecolor=pipeline_colors['VLM'], label='Vision model'),
-            Patch(facecolor=pipeline_colors['HYBRID'], label='Hybrid model (Text+VLM)')
+            Patch(facecolor=pipeline_colors['HYBRID'], label='Hybrid model (Text+VLM)'),
+            Patch(facecolor=pipeline_colors['MULTIMODAL'], label='Multimodal model (Text+Vision)')
         ]
+        
+        # Přidání legendy pro vylepšení
+        if 'Mean_Improved_Overall' in df_overall_sorted.columns:
+            legend_elements.append(
+                Patch(facecolor=improved_color, alpha=0.8, label='Vylepšení sémantickou kontrolou')
+            )
+        
         plt.legend(handles=legend_elements, loc='upper right')
         
         plt.tight_layout()
@@ -1229,7 +1316,7 @@ def generate_comparison_graphs_with_colors(summary_df, overall_df, summary_dir, 
         try:
             overall_columns = ['Model', 'Mean_Total_Overall', 'Std_Total_Overall', 'PipelineType']
             # Přidáme další sloupce, pokud existují
-            for col in ['OriginalModels']:
+            for col in ['Mean_Base_Overall', 'Mean_Improved_Overall', 'OriginalModels']:
                 if col in df_overall_sorted.columns:
                     overall_columns.append(col)
             df_overall_sorted[overall_columns].to_csv(output_csv_overall, index=False, float_format='%.4f')
@@ -1307,7 +1394,8 @@ def generate_graphs_only(results_dir: str):
             sys.executable,
             "-m", "src.main",
             "--graphs-only",
-            "--output-dir", str(config_dir)
+            "--output-dir", str(config_dir),
+            "--config", str(config_dir / "config.json")
         ]
         
         print(f"Spouštím příkaz: {' '.join(cmd_args)}")

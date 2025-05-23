@@ -72,10 +72,17 @@ class ModelConfig:
             with open(config_file, 'r', encoding='utf-8') as f:
                 loaded_config = json.load(f)
             
-            # Aktualizace konfigurace
+            # Kontrola formátu načtených dat
+            if isinstance(loaded_config, list) and len(loaded_config) > 0:
+                # Pokud je to pole konfigurací, použijeme první
+                loaded_config = loaded_config[0]
+                print(f"Načten konfigurační soubor ve formátu pole, používám první konfiguraci s názvem: {loaded_config.get('name', 'unnamed')}")
+            
+            # Nahrazení konfiguračních bloků (místo aktualizace)
             for key in self.config:
                 if key in loaded_config:
-                    self.config[key].update(loaded_config[key])
+                    # Kompletní nahrazení bloku, ne jen update
+                    self.config[key] = loaded_config[key]
             
             print(f"Konfigurace načtena z {config_path}")
         

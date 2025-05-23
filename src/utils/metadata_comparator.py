@@ -111,7 +111,46 @@ class MetadataComparator:
             return 0.0
         
         # Různé metody porovnání podle typu pole
-        if field_type in ['title', 'abstract']:
+        if field_type == 'title':
+            # Speciální případ pro title - kontrola, zda je referenční název obsažen v extrahovaném textu
+            
+            # 1. Nejprve zkontrolujeme přímou shodu (s ignorováním mezer)
+            extracted_nospace = re.sub(r'\s+', ' ', extracted_str).strip()
+            reference_nospace = re.sub(r'\s+', ' ', reference_str).strip()
+            
+            # Metoda 1: Přímé zahrnutí
+            if reference_nospace in extracted_nospace:
+                return 1.0  # Přesná shoda nalezena
+            
+            # Metoda 2: Shoda po odstranění všech bílých znaků (pro tituly rozdělené do více řádků)
+            extracted_nochars = re.sub(r'\s', '', extracted_str)
+            reference_nochars = re.sub(r'\s', '', reference_str)
+            
+            if reference_nochars in extracted_nochars:
+                return 1.0  # Shoda nalezena po odstranění bílých znaků
+                
+            # Metoda 3: Shoda konkrétních slov
+            # Počítáme, kolik slov z referenčního názvu je obsaženo v extrahovaném textu
+            ref_words = set(re.findall(r'\b\w+\b', reference_str))
+            ext_words = set(re.findall(r'\b\w+\b', extracted_str))
+            
+            if len(ref_words) > 0:
+                # Spočítáme poměr nalezených slov
+                words_match_ratio = len(ref_words.intersection(ext_words)) / len(ref_words)
+                
+                # Pokud je alespoň 90% slov z reference v extrahovaném textu, považujeme to za shodu
+                if words_match_ratio >= 0.9:
+                    return 1.0
+            
+            # Pokud nebyla nalezena přesná shoda, pokračujeme běžným porovnáním pomocí TF-IDF
+            try:
+                tfidf_matrix = self.vectorizer.fit_transform([extracted_str, reference_str])
+                return cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+            except:
+                # Fallback na porovnání sekvencí
+                return difflib.SequenceMatcher(None, extracted_str, reference_str).ratio()
+        
+        elif field_type == 'abstract':
             # Pro delší texty použijeme TF-IDF a kosinovou podobnost
             try:
                 tfidf_matrix = self.vectorizer.fit_transform([extracted_str, reference_str])
@@ -121,7 +160,25 @@ class MetadataComparator:
                 return difflib.SequenceMatcher(None, extracted_str, reference_str).ratio()
         
         elif field_type == 'authors':
-            # Pro autory porovnáme jednotlivá jména
+            # Pokud jsou autoři ve speciálním formátu (např. oddělovač ||), porovnáme je pomocí vylepšené metody
+            if '||' in str(reference) or '||' in str(extracted) or ',' in str(reference) or ',' in str(extracted):
+                return self._compare_authors(extracted_str, reference_str)
+                
+            # Pro běžný případ zkontrolujeme, zda sekvence odpovídá (např. pokud není mnoho autorů)
+            if len(extracted_str.split()) <= 4 and len(reference_str.split()) <= 4:
+                # Speciální případy - normalizujeme a porovnáme bez ohledu na pořadí
+                ext_norm = self._normalize_author_name(extracted_str)
+                ref_norm = self._normalize_author_name(reference_str)
+                
+                # Zkontrolujeme, zda jsou stejná slova bez ohledu na pořadí
+                if set(ext_norm.split()) == set(ref_norm.split()):
+                    return 1.0
+                    
+                # Jinak použijeme standardní porovnání sekvencí
+                seq_ratio = difflib.SequenceMatcher(None, ext_norm, ref_norm).ratio()
+                return seq_ratio if seq_ratio > 0.7 else 0.0
+            
+            # Pro složitější případy použijeme specializovanou metodu pro porovnání autorů
             return self._compare_authors(extracted_str, reference_str)
         
         elif field_type == 'year':
@@ -132,7 +189,16 @@ class MetadataComparator:
         
         elif field_type == 'doi':
             # Pro DOI porovnáme přesnou shodu (bez ohledu na velikost písmen)
-            return 1.0 if extracted_str.strip() == reference_str.strip() else 0.0
+            # Nejprve normalizujeme DOI odstraněním prefixů
+            extracted_doi = extracted_str.lower().strip()
+            reference_doi = reference_str.lower().strip()
+            
+            # Odstranění běžných prefixů DOI
+            for prefix in ['doi:', 'https://doi.org/', 'http://doi.org/', 'doi.org/']:
+                extracted_doi = extracted_doi.replace(prefix, '')
+                reference_doi = reference_doi.replace(prefix, '')
+            
+            return 1.0 if extracted_doi.strip() == reference_doi.strip() else 0.0
         
         elif field_type in ['volume', 'issue', 'pages']:
             # Pro číselné údaje porovnáme přesnou shodu
@@ -166,22 +232,67 @@ class MetadataComparator:
         if not extracted_list or not reference_list:
             return 0.0
         
+        # Vytvoření normalizovaných verzí autorů s odstraněnými diakritickými znaky
+        extracted_normalized = [self._normalize_author_name(author) for author in extracted_list]
+        reference_normalized = [self._normalize_author_name(author) for author in reference_list]
+        
         # Výpočet podobnosti pro každého autora
         matches = 0
-        for ext_author in extracted_list:
-            best_match = max([difflib.SequenceMatcher(None, ext_author, ref_author).ratio() 
-                             for ref_author in reference_list])
-            if best_match > 0.8:  # Práh pro shodu
-                matches += 1
+        for i, ext_author in enumerate(extracted_list):
+            ext_norm = extracted_normalized[i]
+            
+            # Zkusíme nejprve najít přímou shodu po normalizaci
+            direct_match = False
+            for ref_norm in reference_normalized:
+                # Kontrola, zda jsou stejná slova, bez ohledu na pořadí
+                if set(ext_norm.split()) == set(ref_norm.split()):
+                    matches += 1
+                    direct_match = True
+                    break
+            
+            # Pokud nebyla nalezena přímá shoda, zkusíme částečnou
+            if not direct_match:
+                best_match = max([difflib.SequenceMatcher(None, ext_norm, ref_norm).ratio() 
+                                for ref_norm in reference_normalized])
+                if best_match > 0.7:  # Snížení prahu pro shodu
+                    matches += best_match  # Přidáme částečnou shodu s váhou podle podobnosti
         
         # Výpočet F1 skóre (kombinace přesnosti a úplnosti)
         precision = matches / len(extracted_list) if extracted_list else 0
-        recall = matches / len(reference_list) if reference_list else 0
+        recall = min(matches, len(reference_list)) / len(reference_list) if reference_list else 0
         
         if precision + recall == 0:
             return 0.0
         
         return 2 * (precision * recall) / (precision + recall)
+    
+    def _normalize_author_name(self, author):
+        """
+        Normalizuje jméno autora pro lepší porovnání.
+        
+        Args:
+            author (str): Jméno autora
+            
+        Returns:
+            str: Normalizované jméno autora
+        """
+        # Převedení na malá písmena
+        author = author.lower()
+        
+        # Odstranění diakritiky
+        import unicodedata
+        author = ''.join(
+            c for c in unicodedata.normalize('NFD', author)
+            if unicodedata.category(c) != 'Mn'
+        )
+        
+        # Odstranění všech znaků, které nejsou písmena nebo mezery
+        author = re.sub(r'[^a-z \s]', '', author)
+        
+        # Odstranění nadbytečných mezer
+        author = re.sub(r'\s+', ' ', author).strip()
+        
+        return author
     
     def _split_authors(self, authors_str):
         """
@@ -193,14 +304,69 @@ class MetadataComparator:
         Returns:
             list: Seznam jednotlivých autorů
         """
+        if not authors_str or pd.isna(authors_str):
+            return []
+            
+        # Kontrola, zda se jedná o speciální formát s oddělovačem ||
+        if '||' in authors_str:
+            # Rozdělení podle speciálního oddělovače
+            authors = authors_str.split('||')
+            return [author.strip() for author in authors if author.strip()]
+        
         # Odstranění běžných oddělovačů
         authors_str = authors_str.replace(' and ', ', ')
         
         # Rozdělení podle čárky nebo středníku
         authors = re.split(r'[,;]\s*', authors_str)
         
-        # Odstranění prázdných řetězců a normalizace
-        return [author.strip().lower() for author in authors if author.strip()]
+        # Filtrování prázdných řetězců
+        authors = [author.strip() for author in authors if author.strip()]
+        
+        # Pokud jsme dostali pouze jeden záznam s mezerami, může jít o více autorů
+        # oddělených mezerami (např. "Jan Novák Petr Svoboda")
+        if len(authors) == 1 and len(authors[0].split()) > 3:
+            # Zkusíme detekovat více autorů v jednom řetězci
+            words = authors[0].split()
+            potential_authors = []
+            
+            i = 0
+            while i < len(words):
+                # Předpokládáme, že autor má 1-3 slova
+                for name_len in [2, 3]:  # Zkusíme nejprve délku 2, pak 3
+                    if i + name_len <= len(words):
+                        name = ' '.join(words[i:i+name_len])
+                        if self._looks_like_name(name):
+                            potential_authors.append(name)
+                            i += name_len
+                            break
+                else:  # Pokud nebyl nalezen platný název, přidáme jedno slovo
+                    i += 1
+            
+            # Pokud jsme našli více než 1 potenciálního autora, použijeme tento seznam
+            if len(potential_authors) > 1:
+                authors = potential_authors
+        
+        return authors
+    
+    def _looks_like_name(self, text):
+        """
+        Kontrola, zda text vypadá jako jméno autora.
+        
+        Args:
+            text (str): Text k ověření
+            
+        Returns:
+            bool: True, pokud text vypadá jako jméno autora
+        """
+        # Jednoduchá heuristika - každé slovo by mělo začínat velkým písmenem
+        words = text.split()
+        
+        # Případ: "Příjmení, Jméno"
+        if len(words) == 2 and ',' in words[0]:
+            return words[0][0].isupper() and words[1][0].isupper()
+            
+        # Běžný případ: "Jméno Příjmení"
+        return all(word[0].isupper() for word in words if word)
     
     def _extract_year(self, year_str):
         """

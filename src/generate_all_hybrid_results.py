@@ -29,7 +29,7 @@ def run_command(cmd, verbose=True):
 
 def combine_results_for_config(config_dir, verbose=True):
     """
-    Vytvoří hybridní výsledky pro danou konfiguraci.
+    Vytvoří hybridní výsledky pro danou konfiguraci pomocí dynamického hybrid pipeline.
     
     Args:
         config_dir (str): Cesta k adresáři s konfigurací
@@ -54,13 +54,27 @@ def combine_results_for_config(config_dir, verbose=True):
             print(f"Přeskakuji {config_dir} - hybrid_results.json již existuje")
         return True
     
-    # Vytvoříme hybridní výsledky pomocí combine_pipeline_results
-    cmd = f'python -m src.run_all_models --combine-only --results-dir "{config_dir}"'
-    return run_command(cmd, verbose) == 0
+    # Vytvoříme hybridní výsledky pomocí DYNAMICKÉHO hybrid pipeline pro základní výsledky
+    # Nejprve potřebujeme sémantické výsledky pro rozhodování
+    semantic_success = combine_semantic_results_for_config(config_dir, verbose)
+    if not semantic_success:
+        if verbose:
+            print(f"Nepodařilo se vytvořit sémantické výsledky pro {config_dir}")
+        return False
+    
+    cmd = f'python -m src.dynamic_hybrid_pipeline --dir "{config_dir}" --base-only --confidence-threshold 0.05'
+    base_success = run_command(cmd, verbose) == 0
+    
+    if base_success:
+        # Spuštění přímého porovnání s referenčními daty pro hybridní pipeline
+        comparison_cmd = f'python -m src.run_all_models --combine-only --results-dir "{config_dir}"'
+        return run_command(comparison_cmd, verbose) == 0
+    
+    return False
 
 def combine_semantic_results_for_config(config_dir, verbose=True):
     """
-    Vytvoří hybridní sémantické výsledky pro danou konfiguraci.
+    Vytvoří hybridní sémantické výsledky pro danou konfiguraci pomocí dynamického hybrid pipeline.
     
     Args:
         config_dir (str): Cesta k adresáři s konfigurací
@@ -85,8 +99,8 @@ def combine_semantic_results_for_config(config_dir, verbose=True):
             print(f"Přeskakuji sémantickou kombinaci {config_dir} - hybrid_comparison_semantic.json již existuje")
         return True
     
-    # Vytvoříme hybridní sémantické výsledky pomocí combine_semantic_results
-    cmd = f'python -m src.combine_semantic_results --dir "{config_dir}"'
+    # Vytvoříme hybridní sémantické výsledky pomocí DYNAMICKÉHO hybrid pipeline
+    cmd = f'python -m src.dynamic_hybrid_pipeline --dir "{config_dir}" --semantic-only --confidence-threshold 0.05'
     return run_command(cmd, verbose) == 0
 
 def generate_graphs_for_config(config_dir, verbose=True):

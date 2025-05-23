@@ -120,8 +120,8 @@ def prepare_reference_data(csv_path):
             'volume': row.get('utb.relation.volume', ''),
             'issue': row.get('utb.relation.issue', ''),
             'pages': f"{row.get('dc.citation.spage', '')}-{row.get('dc.citation.epage', '')}",
-            'publisher': row.get('dc.publisher', ''),
-            'references': row.get('utb.fulltext.references', '')
+            'publisher': row.get('dc.publisher', '')
+            # 'references' pole vyřazeno z extrakce
         }
         
         reference_data[paper_id] = metadata
@@ -129,7 +129,7 @@ def prepare_reference_data(csv_path):
     return reference_data
 
 
-def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_download=False, skip_semantic=False, force_extraction=False):
+def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_download=False, skip_semantic=False, force_extraction=False, include_references=False):
     """
     Spustí celý proces extrakce metadat a porovnání výsledků.
     
@@ -140,6 +140,7 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
         skip_download (bool, optional): Přeskočí stahování PDF souborů
         skip_semantic (bool, optional): Přeskočí sémantické porovnání
         force_extraction (bool): Vynutí novou extrakci metadat
+        include_references (bool): Zahrne reference do textu pro embedded pipeline
         
     Returns:
         tuple: Výsledky porovnání, časy, tokeny
@@ -247,7 +248,8 @@ def run_extraction_pipeline(limit=None, models=None, year_filter=None, skip_down
                     text_api_key=text_api_key,
                     embedding_api_key=embedding_api_key,
                     embedding_provider_name=embedding_provider_name,
-                    embedding_model_name=embedding_model_name
+                    embedding_model_name=embedding_model_name,
+                    exclude_references=not include_references
                 )
                 # <<< Konec změny >>>
             except Exception as e:
@@ -496,167 +498,213 @@ def prepare_plotting_data(comparison_files, all_timings, all_token_usages, inclu
         "vlm": "#ff7f0e",  # oranžová
         "embedded": "#2ca02c",  # zelená
         "multimodal": "#d62728",  # červená
-        "text_semantic": "#9467bd",  # fialová
-        "vlm_semantic": "#8c564b",  # hnědá
-        "embedded_semantic": "#e377c2",  # růžová
-        "multimodal_semantic": "#7f7f7f",  # šedá
-        "hybrid": "#17becf",  # tyrkysová
-        "hybrid_semantic": "#bcbd22"  # olivová
+        "hybrid": "#17becf"  # tyrkysová
     }
     
     # Inicializace prázdných seznamů pro data
     detailed_data = []
     overall_data = []
     
+    # Slovníky pro ukládání základních a sémantických dat pro každý model
+    basic_data = {}
+    semantic_data = {}
+    
     # Zpracování každého model a souboru s jeho výsledky
     for model, comparison_file in comparison_files.items():
+        # Přeskočit soubory s '_semantic' v názvu - zpracujeme je později jinak
+        if "_semantic" in model:
+            continue
+        
         model_upper = model.upper()
         
-        # Zjistíme, zda jde o sémantické porovnání
-        is_semantic = str(comparison_file).endswith("_semantic.json")
+        # Načtení dat ze základního porovnávacího souboru
+        basic_comparison_data = load_comparison_data_from_path(comparison_file)
+        if not basic_comparison_data:
+            print(f"VAROVÁNÍ: Nepodařilo se načíst data pro {model} z {comparison_file}.")
+            continue
+            
+        # Načtení dat ze sémantického porovnávacího souboru, pokud existuje
+        semantic_comparison_file = comparison_file.parent / f"{model}_comparison_semantic.json"
+        semantic_comparison_data = None
+        if include_semantic and semantic_comparison_file.exists():
+            semantic_comparison_data = load_comparison_data_from_path(semantic_comparison_file)
+            if not semantic_comparison_data:
+                print(f"VAROVÁNÍ: Nepodařilo se načíst sémantická data pro {model} z {semantic_comparison_file}.")
         
-        # Načtení dat z porovnávacího souboru
-        try:
-            with open(comparison_file, 'r', encoding='utf-8') as f:
-                comparison_data = json.load(f)
+        # Uložíme reference na data pro pozdější zpracování
+        basic_data[model] = basic_comparison_data
+        if semantic_comparison_data:
+            semantic_data[model] = semantic_comparison_data
+            
+        # Zpracování časů a tokenů pro tento model
+        model_timings = all_timings.get(model, {})
+        model_tokens = all_token_usages.get(model, {})
+        
+        # Výpočet průměrných časů a tokenů
+        if model_timings:
+            avg_duration = sum(model_timings.values()) / len(model_timings)
+            total_duration = sum(model_timings.values())
+        else:
+            avg_duration = None
+            total_duration = None
+        
+        # Výpočet celkového počtu tokenů
+        total_input_tokens = 0
+        total_output_tokens = 0
+        if model_tokens:
+            for _, tokens in model_tokens.items():
+                if isinstance(tokens, dict):
+                    total_input_tokens += tokens.get('input_tokens', 0)
+                    total_output_tokens += tokens.get('output_tokens', 0)
+        
+        # Přidání celkových metrik pro tento model
+        # Použijeme sémantická data, pokud jsou k dispozici
+        metrics_data = semantic_comparison_data.get('metrics') if semantic_comparison_data else basic_comparison_data.get('metrics')
+        
+        if metrics_data:
+            # Přidáme celkovou podobnost
+            if 'overall_similarity' in metrics_data:
+                overall_value = metrics_data['overall_similarity']
+                # Pokud máme sémantická data, zjistíme základní a vylepšenou část
+                base_value = basic_comparison_data.get('metrics', {}).get('overall_similarity', 0)
+                improved_value = max(0, overall_value - base_value) if semantic_comparison_data else 0
                 
-            # Kontrola, zda má soubor správnou strukturu
-            if 'comparison' not in comparison_data:
-                print(f"VAROVÁNÍ: Soubor {comparison_file} neobsahuje klíč 'comparison', přeskakuji.")
-                continue
-
-            comparison_dict = comparison_data['comparison']
-            
-            # Data pro celkové metriky
-            overall_metrics = None
-            if 'metrics' in comparison_data:
-                overall_metrics = comparison_data['metrics']
-            
-            # Zpracování časů a tokenů pro tento model
-            model_timings = all_timings.get(model, {})
-            model_tokens = all_token_usages.get(model, {})
-            
-            # Výpočet průměrných časů a tokenů
-            if model_timings:
-                avg_duration = sum(model_timings.values()) / len(model_timings)
-                total_duration = sum(model_timings.values())
-            else:
-                avg_duration = None
-                total_duration = None
-            
-            # Výpočet celkového počtu tokenů
-            total_input_tokens = 0
-            total_output_tokens = 0
-            if model_tokens:
-                for _, tokens in model_tokens.items():
-                    if isinstance(tokens, dict):
-                        total_input_tokens += tokens.get('input_tokens', 0)
-                        total_output_tokens += tokens.get('output_tokens', 0)
-            
-            # Přidání celkových metrik pro tento model
-            if overall_metrics:
-                # Přidáme celkovou podobnost
-                if 'overall_similarity' in overall_metrics:
-                    overall_data.append({
-                        'Model': model_upper,
-                        'Metric': 'Overall Similarity',
-                        'Value': overall_metrics['overall_similarity'],
-                        'Type': 'Semantic' if is_semantic else 'Basic',
-                        'PipelineType': model_upper  # Přidáno pro rozlišení v grafech
-                    })
-                
-                # Přidáme metriky pro jednotlivé typy metadat (pokud existují)
-                for field in ['title', 'authors', 'abstract', 'keywords', 'doi', 'year', 'journal', 'volume', 'issue', 'pages', 'publisher', 'references']:
-                    field_key = f"{field}_similarity"
-                    if field_key in overall_metrics:
-                        overall_data.append({
-                            'Model': model_upper,
-                            'Metric': field.capitalize(),
-                            'Value': overall_metrics[field_key],
-                            'Type': 'Semantic' if is_semantic else 'Basic',
-                            'PipelineType': model_upper
-                        })
-            
-            # Přidání metrik pro čas a tokeny
-            if avg_duration is not None:
                 overall_data.append({
                     'Model': model_upper,
-                    'Metric': 'Avg Duration (s)',
-                    'Value': avg_duration,
-                    'Type': 'Performance',
-                    'PipelineType': model_upper
+                    'Metric': 'Overall Similarity',
+                    'Value': overall_value, 
+                    'BaseValue': base_value,
+                    'ImprovedValue': improved_value,
+                    'PipelineType': model_upper  # Přidáno pro rozlišení v grafech
                 })
             
+            # Přidáme metriky pro jednotlivé typy metadat (pokud existují)
+            for field in ['title', 'authors', 'abstract', 'keywords', 'doi', 'year', 'journal', 'volume', 'issue', 'pages', 'publisher']:
+                # 'references' vyřazeno z extrakce
+                field_key = f"{field}_similarity"
+                if field_key in metrics_data:
+                    field_value = metrics_data[field_key]
+                    # Pokud máme sémantická data, zjistíme základní a vylepšenou část
+                    base_field_value = basic_comparison_data.get('metrics', {}).get(field_key, 0)
+                    improved_field_value = max(0, field_value - base_field_value) if semantic_comparison_data else 0
+                    
+                    overall_data.append({
+                        'Model': model_upper,
+                        'Metric': field.capitalize(),
+                        'Value': field_value,
+                        'BaseValue': base_field_value,
+                        'ImprovedValue': improved_field_value,
+                        'PipelineType': model_upper
+                    })
+        
+        # Přidání metrik pro čas a tokeny
+        if avg_duration is not None:
             overall_data.append({
                 'Model': model_upper,
-                'Metric': 'Input Tokens',
-                'Value': total_input_tokens,
-                'Type': 'Usage',
+                'Metric': 'Avg Duration (s)',
+                'Value': avg_duration,
+                'BaseValue': avg_duration,
+                'ImprovedValue': 0,
+                'Type': 'Performance',
                 'PipelineType': model_upper
             })
+        
+        overall_data.append({
+            'Model': model_upper,
+            'Metric': 'Input Tokens',
+            'Value': total_input_tokens,
+            'BaseValue': total_input_tokens,
+            'ImprovedValue': 0,
+            'Type': 'Usage',
+            'PipelineType': model_upper
+        })
+        
+        overall_data.append({
+            'Model': model_upper,
+            'Metric': 'Output Tokens',
+            'Value': total_output_tokens,
+            'BaseValue': total_output_tokens,
+            'ImprovedValue': 0,
+            'Type': 'Usage',
+            'PipelineType': model_upper
+        })
+        
+        # Zpracování detailních dat pro každý dokument a typ metadat
+        # Použijeme sémantická data, pokud jsou k dispozici
+        comparison_dict = semantic_comparison_data.get('comparison') if semantic_comparison_data else basic_comparison_data.get('comparison')
+        
+        if not comparison_dict:
+            print(f"VAROVÁNÍ: Žádná data pro porovnání v modelu {model}.")
+            continue
             
-            overall_data.append({
-                'Model': model_upper,
-                'Metric': 'Output Tokens',
-                'Value': total_output_tokens,
-                'Type': 'Usage',
-                'PipelineType': model_upper
-            })
-            
-            # Zpracování detailních dat pro každý dokument a typ metadat
-            for paper_id, paper_data in comparison_dict.items():
-                # Přidána kontrola prázdných dat
-                if paper_data is None:
-                    print(f"VAROVÁNÍ: Prázdná data pro dokument {paper_id} v souboru {comparison_file}, přeskakuji.")
-                    continue
+        for paper_id, paper_data in comparison_dict.items():
+            # Přidána kontrola prázdných dat
+            if paper_data is None:
+                print(f"VAROVÁNÍ: Prázdná data pro dokument {paper_id} v modelu {model}, přeskakuji.")
+                continue
+                
+            for metadata_field, field_data in paper_data.items():
+                if metadata_field == 'overall_similarity':
+                    continue  # Přeskočíme, to je souhrnná metrika
+                
+                # Získání hodnoty podobnosti
+                similarity = None
+                if isinstance(field_data, dict) and 'similarity' in field_data:
+                    similarity = field_data['similarity']
+                elif isinstance(field_data, (int, float)):
+                    similarity = field_data
+                
+                if similarity is not None:
+                    # Získání referenčních a extrahovaných hodnot
+                    reference = None
+                    extracted = None
+                    if isinstance(field_data, dict):
+                        reference = field_data.get('reference')
+                        extracted = field_data.get('extracted')
                     
-                for metadata_field, field_data in paper_data.items():
-                    if metadata_field == 'overall_similarity':
-                        continue  # Přeskočíme, to je souhrnná metrika
+                    # Získání času a tokenů pro dokument
+                    duration = model_timings.get(str(paper_id), None)
                     
-                    # Získání hodnoty podobnosti
-                    similarity = None
-                    if isinstance(field_data, dict) and 'similarity' in field_data:
-                        similarity = field_data['similarity']
-                    elif isinstance(field_data, (int, float)):
-                        similarity = field_data
+                    doc_tokens = model_tokens.get(str(paper_id), {})
+                    input_tokens = 0
+                    output_tokens = 0
+                    if isinstance(doc_tokens, dict):
+                        input_tokens = doc_tokens.get('input_tokens', 0)
+                        output_tokens = doc_tokens.get('output_tokens', 0)
                     
-                    if similarity is not None:
-                        # Získání referenčních a extrahovaných hodnot
-                        reference = None
-                        extracted = None
-                        if isinstance(field_data, dict):
-                            reference = field_data.get('reference')
-                            extracted = field_data.get('extracted')
-                        
-                        # Získání času a tokenů pro dokument
-                        duration = model_timings.get(str(paper_id), None)
-                        
-                        doc_tokens = model_tokens.get(str(paper_id), {})
-                        input_tokens = 0
-                        output_tokens = 0
-                        if isinstance(doc_tokens, dict):
-                            input_tokens = doc_tokens.get('input_tokens', 0)
-                            output_tokens = doc_tokens.get('output_tokens', 0)
-                        
-                        # Přidání detailních dat
-                        detailed_data.append({
-                            'DOI': paper_id,
-                            'Model': model_upper,
-                            'Metadata': metadata_field.capitalize(),
-                            'Value': similarity,
-                            'Reference': reference,
-                            'Extracted': extracted,
-                            'Duration': duration,
-                            'Input_Tokens': input_tokens,
-                            'Output_Tokens': output_tokens,
-                            'Type': 'Semantic' if is_semantic else 'Basic',
-                            'PipelineType': model_upper
-                        })
-        except Exception as e:
-            print(f"Chyba při zpracování souboru {comparison_file}: {e}")
-            import traceback
-            traceback.print_exc()
+                    # Získání základní hodnoty podobnosti (před sémantickou kontrolou)
+                    basic_similarity = None
+                    if basic_comparison_data and 'comparison' in basic_comparison_data:
+                        basic_paper_data = basic_comparison_data['comparison'].get(paper_id, {})
+                        if basic_paper_data and metadata_field in basic_paper_data:
+                            basic_field_data = basic_paper_data[metadata_field]
+                            if isinstance(basic_field_data, dict) and 'similarity' in basic_field_data:
+                                basic_similarity = basic_field_data['similarity']
+                            elif isinstance(basic_field_data, (int, float)):
+                                basic_similarity = basic_field_data
+                    
+                    # Pokud nemáme základní podobnost, použijeme současnou hodnotu
+                    if basic_similarity is None:
+                        basic_similarity = similarity
+                    
+                    # Výpočet vylepšené části (po sémantické kontrole)
+                    improved_similarity = max(0, similarity - basic_similarity)
+                    
+                    # Přidání detailních dat
+                    detailed_data.append({
+                        'DOI': paper_id,
+                        'Model': model_upper,
+                        'Metadata': metadata_field.capitalize(),
+                        'Value': similarity,  # Celková hodnota (po sémantické kontrole)
+                        'BaseValue': basic_similarity,  # Základní hodnota před sémantickou kontrolou
+                        'ImprovedValue': improved_similarity,  # Hodnota přidaná sémantickou kontrolou
+                        'Reference': reference,
+                        'Extracted': extracted,
+                        'Duration': duration,
+                        'Input_Tokens': input_tokens,
+                        'Output_Tokens': output_tokens,
+                        'PipelineType': model_upper
+                    })
     
     # Vytvoření DataFrame
     detailed_df = pd.DataFrame(detailed_data)
@@ -692,7 +740,7 @@ def plot_comparison_boxplot(detailed_df, filename="comparison_results_boxplot.pn
     try:
         plt.figure(figsize=(14, 8))
         
-        # Použití Seaborn pro boxplot
+        # Použití Seaborn pro boxplot - nyní použijeme data po sémantické kontrole (Value)
         sns.boxplot(x='Metadata', y='Value', hue='Model', data=detailed_df)
         
         plt.title('Porovnání podobnosti podle typu metadat')
@@ -729,7 +777,7 @@ def plot_overall_boxplot(detailed_df, filename="overall_results_boxplot.png"):
         return
         
     try:
-        # Agregace dat na úrovni dokumentu a modelu
+        # Agregace dat na úrovni dokumentu a modelu - nyní používáme pouze hodnoty po sémantické kontrole
         overall_scores = detailed_df.groupby(['DOI', 'Model'])['Value'].mean().reset_index()
 
         plt.figure(figsize=(10, 6))
@@ -781,6 +829,9 @@ def visualize_results(comparison_files, all_timings, all_token_usages, include_s
         "HYBRID": "#17becf"  # tyrkysová
     }
     
+    # Barva pro vylepšenou část (sémantické zlepšení)
+    improved_color = "#f8c471"  # světle oranžová
+    
     # 1. Graf celkového porovnání (Overall Similarity)
     overall_similarity_df = overall_df[overall_df['Metric'] == 'Overall Similarity']
     
@@ -789,28 +840,31 @@ def visualize_results(comparison_files, all_timings, all_token_usages, include_s
         plt.figure(figsize=(10, 6))
         
         # Použijeme různé barvy pro různé typy modelů
-        bars = []
         for model in overall_similarity_df['Model'].unique():
             model_data = overall_similarity_df[overall_similarity_df['Model'] == model]
             if model in pipeline_colors:
-                bar = plt.bar(model, model_data['Value'].values[0], color=pipeline_colors.get(model, 'gray'), alpha=0.7)
-                bars.append(bar[0])
+                # Vykreslit základní část sloupce
+                base_value = model_data['BaseValue'].values[0]
+                improved_value = model_data['ImprovedValue'].values[0]
+                total_value = model_data['Value'].values[0]
+                
+                # Základní část
+                plt.bar(model, base_value, color=pipeline_colors.get(model, 'gray'), alpha=0.8)
+                
+                # Vylepšená část (pokud existuje)
+                if improved_value > 0:
+                    plt.bar(model, improved_value, bottom=base_value, color=improved_color, alpha=0.8)
         
         plt.title('Celkové porovnání extrakce metadat')
         plt.xlabel('Model')
         plt.ylabel('Průměrná podobnost')
         plt.ylim(0, 1.1)  # Rozsah od 0 do 1.1 (pro viditelnost hodnot blížících se 1)
         
-        # Popisky nad sloupci
-        for bar in plt.gca().patches:
-            plt.gca().text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.01,
-                f'{bar.get_height():.2f}',
-                ha='center',
-                color='black',
-                fontweight='bold'
-            )
+        # Popisky nad sloupci - celková hodnota po sémantické kontrole
+        for i, model in enumerate(overall_similarity_df['Model']):
+            total_height = overall_similarity_df[overall_similarity_df['Model'] == model]['Value'].values[0]
+            plt.text(i, total_height + 0.01, f'{total_height:.2f}', 
+                    ha='center', va='bottom', color='black', fontweight='bold')
         
         plt.tight_layout()
         plt.savefig(get_run_results_dir() / 'overall_results.png', dpi=300, bbox_inches='tight')
@@ -837,25 +891,35 @@ def visualize_results(comparison_files, all_timings, all_token_usages, include_s
         
         # Pro každý model vytvoříme skupinu sloupců
         i = 0
-        bars = []
         for model in sorted(detailed_df['Model'].unique()):
             model_data = detailed_df[detailed_df['Model'] == model]
-            avg_values = []
             
-            for field in metadata_fields:
+            for field_idx, field in enumerate(metadata_fields):
                 field_data = model_data[model_data['Metadata'] == field]
+                
                 if len(field_data) > 0:
-                    avg_values.append(field_data['Value'].mean())
-                else:
-                    avg_values.append(0)
+                    # Výpočet průměrných hodnot základní a vylepšené části
+                    avg_base = field_data['BaseValue'].mean()
+                    avg_improved = field_data['ImprovedValue'].mean()
+                    
+                    # Pozice sloupce
+                    pos = field_idx + i * width - width * (model_count - 1) / 2
+                    
+                    # Vykreslení základní části
+                    plt.bar(pos, avg_base, width * 0.9, 
+                           color=pipeline_colors.get(model, 'gray'), alpha=0.8)
+                    
+                    # Vykreslení vylepšené části (pokud existuje)
+                    if avg_improved > 0:
+                        plt.bar(pos, avg_improved, width * 0.9, 
+                               bottom=avg_base, color=improved_color, alpha=0.8)
+                    
+                    # Přidání popisku s celkovou hodnotou
+                    total_height = avg_base + avg_improved
+                    if field_idx == 0:  # Přidat legendu pouze pro první sloupec v každé skupině
+                        plt.text(pos, total_height + 0.02, f'{total_height:.2f}',
+                                ha='center', va='bottom', fontsize=8)
             
-            # Pozice sloupců pro tento model
-            model_pos = x + i * width - width * (model_count - 1) / 2
-            
-            # Přidáme sloupce s barvou podle typu modelu
-            bar = plt.bar(model_pos, avg_values, width * 0.9, label=model, 
-                    color=pipeline_colors.get(model, 'grey'), alpha=0.7)
-            bars.append(bar)
             i += 1
         
         plt.xlabel('Typ metadat')
@@ -863,7 +927,22 @@ def visualize_results(comparison_files, all_timings, all_token_usages, include_s
         plt.title('Porovnání úspěšnosti extrakce podle typu metadat')
         plt.xticks(x, metadata_fields, rotation=45, ha='right')
         plt.ylim(0, 1.1)
-        plt.legend()
+        
+        # Vlastní legenda
+        from matplotlib.patches import Patch
+        legend_elements = []
+        
+        # Přidání všech modelů do legendy
+        for model in sorted(detailed_df['Model'].unique()):
+            legend_elements.append(Patch(facecolor=pipeline_colors.get(model, 'gray'), alpha=0.8, 
+                                        label=model))
+        
+        # Přidání vylepšené části do legendy
+        if include_semantic:
+            legend_elements.append(Patch(facecolor=improved_color, alpha=0.8, 
+                                         label='Vylepšení sémantickou kontrolou'))
+        
+        plt.legend(handles=legend_elements, loc='upper right')
         plt.tight_layout()
         
         plt.savefig(get_run_results_dir() / 'comparison_results.png', dpi=300, bbox_inches='tight')
@@ -877,7 +956,7 @@ def visualize_results(comparison_files, all_timings, all_token_usages, include_s
     # Uložení detailních výsledků do CSV
     try:
         # Upravíme sloupce před uložením
-        detailed_csv_columns = ['DOI', 'Model', 'Metadata', 'Value', 'Type']
+        detailed_csv_columns = ['DOI', 'Model', 'Metadata', 'Value', 'BaseValue', 'ImprovedValue']
         detailed_df.to_csv(get_run_results_dir() / 'detailed_scores_all.csv', 
                          columns=detailed_csv_columns, index=False)
         print(f"Detailní výsledky uloženy do CSV: {get_run_results_dir() / 'detailed_scores_all.csv'}")
@@ -900,6 +979,8 @@ def visualize_results(comparison_files, all_timings, all_token_usages, include_s
                         'Field': field,
                         'Mean_Total': field_data['Value'].mean(),
                         'Std_Total': field_data['Value'].std() if len(field_data) > 1 else 0,
+                        'Mean_Base': field_data['BaseValue'].mean(),
+                        'Mean_Improved': field_data['ImprovedValue'].mean(),
                         'Count': len(field_data)
                     })
         
@@ -921,6 +1002,8 @@ def visualize_results(comparison_files, all_timings, all_token_usages, include_s
                     'Model': model,
                     'Mean_Total_Overall': model_data['Value'].mean(),
                     'Std_Total_Overall': model_data['Value'].std() if len(model_data) > 1 else 0,
+                    'Mean_Base_Overall': model_data['BaseValue'].mean(),
+                    'Mean_Improved_Overall': model_data['ImprovedValue'].mean(),
                     'Count_Overall': len(model_data)
                 })
         
@@ -935,9 +1018,11 @@ def visualize_results(comparison_files, all_timings, all_token_usages, include_s
         try:
             semantic_summary = {}
             for model, comparison_file in comparison_files.items():
-                if str(comparison_file).endswith("_semantic.json"):
-                    with open(comparison_file, 'r', encoding='utf-8') as f:
-                        semantic_summary[model] = json.load(f)
+                if "_semantic" not in model:  # Bereme pouze základní modely
+                    semantic_file = comparison_file.parent / f"{model}_comparison_semantic.json"
+                    if semantic_file.exists():
+                        with open(semantic_file, 'r', encoding='utf-8') as f:
+                            semantic_summary[model] = json.load(f)
             
             # Vytvoření adresáře, pokud neexistuje
             final_dir = get_run_results_dir() / "final_comparison"
@@ -1038,6 +1123,10 @@ def main():
     parser.add_argument('--compare-only', type=str, choices=['embedded', 'vlm', 'text', 'multimodal', 'hybrid'], 
                         help="Pouze porovná výsledky daného modelu s referenčními daty bez nové extrakce")
     # <<< Konec změny >>>
+    # <<< Přidáno: Parametr pro zahrnutí referencí do extrakce >>>
+    parser.add_argument('--include-references', action='store_true', 
+                        help="Zahrne reference do textu pro embedded pipeline (výchozí je vyloučit reference)")
+    # <<< Konec přidání >>>
     
     args = parser.parse_args()
     
@@ -1059,6 +1148,19 @@ def main():
     
     # Načtení konfigurace
     config_path = args.config if args.config else str(MODELS_JSON)
+    
+    # Při --graphs-only se pokusíme načíst konfiguraci z used_config.json v adresáři výsledků
+    # POUZE pokud není explicitně zadán --config parametr
+    if args.graphs_only and not args.config:
+        used_config_path = get_run_results_dir() / "used_config.json"
+        if used_config_path.exists():
+            print(f"Načítám konfiguraci z {used_config_path} (režim --graphs-only)...")
+            config_path = str(used_config_path)
+        else:
+            print(f"Soubor used_config.json nebyl nalezen v {get_run_results_dir()}, používám globální konfiguraci.")
+    elif args.graphs_only and args.config:
+        print(f"Používám explicitně zadanou konfiguraci {config_path} (režim --graphs-only)...")
+    
     if os.path.exists(config_path):
         print(f"Načítám konfiguraci z {config_path}...")
         load_config(config_path)
@@ -1075,9 +1177,10 @@ def main():
         if multimodal_config:
             print(f"  Multimodal provider: {multimodal_config['provider']}, model: {multimodal_config['model']}")
         
-        # Uložíme použitou konfiguraci pro pozdější analýzu
-        with open(get_run_results_dir() / "used_config.json", 'w', encoding='utf-8') as f:
-            json.dump(config.config, f, ensure_ascii=False, indent=2)
+        # Uložíme použitou konfiguraci pro pozdější analýzu (pouze pokud není --graphs-only)
+        if not args.graphs_only:
+            with open(get_run_results_dir() / "used_config.json", 'w', encoding='utf-8') as f:
+                json.dump(config.config, f, ensure_ascii=False, indent=2)
     else:
         print(f"VAROVÁNÍ: Konfigurační soubor {config_path} neexistuje, používám výchozí konfiguraci.")
         # Uložíme výchozí konfiguraci
@@ -1231,7 +1334,8 @@ def main():
             year_filter=args.year_filter, 
             skip_download=args.skip_download,
             skip_semantic=args.skip_semantic,
-            force_extraction=args.force_extraction
+            force_extraction=args.force_extraction,
+            include_references=args.include_references
         )
     except Exception as e:
         print(f"Chyba při spuštění pipeline: {e}")
